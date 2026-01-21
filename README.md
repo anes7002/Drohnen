@@ -2,7 +2,7 @@
 
 Projekt mit Flutter Frontend und Python Backend.
 
-## Setup nach dem Klonen
+## Setup
 
 ### Backend (Python)
 
