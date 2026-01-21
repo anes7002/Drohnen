@@ -1,5 +1,3 @@
-import djitellopy as tello
-
 def get_all_telemetry(self):
     if not self.connected:
         raise Exception("Drone is not connected")
