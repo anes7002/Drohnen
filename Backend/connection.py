@@ -20,5 +20,11 @@ class DroneConnection:
             self.connected = False
             return False
 
-    
+    def disconnect(self):
+        if self.socket:
+            self.socket.close()
+        self.connected = False
+
+   
+
         
