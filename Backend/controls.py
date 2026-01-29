@@ -28,6 +28,13 @@ y
     def right(self, distance=50):
         self.drone.flight.right(distance)
 
+    #Steigen und Sinken
+    def up(self, distance=30):
+        self.drone.flight.up(distance)
+
+    def down(self, distance=30):
+        self.drone.flight.down(distance)
+
     
 
 
