@@ -35,7 +35,12 @@ y
     def down(self, distance=30):
         self.drone.flight.down(distance)
 
-    
+    #Drehung 
+      def rotate_left(self, angle=45):
+        self.drone.flight.turn_left(angle)
+
+    def rotate_right(self, angle=45):
+        self.drone.flight.turn_right(angle)
 
 
 
