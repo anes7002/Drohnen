@@ -1,11 +1,11 @@
 import time
-from robomaster import drone
+from robomaster import robot
+import keyboard
 
 class Control:
 
     def __init__(self, drone):
         self.drone = drone
-
 
     #Starten
     def takeoff(self):
@@ -42,6 +42,20 @@ y
     def rotate_right(self, angle=45):
         self.drone.flight.turn_right(angle)
 
+
+    #Keyboard Steuerung
+    def keyboard_control(self, speed=50):
+
+    print("WASD = Beweegen, Pfeile = Höhe / Drehung , E = Start, Q = Landen, ESC = Beenden")
+
+    self.running = True
+
+    forward = 0
+    right = 0
+    up = 0
+    yaw = 0
+
+    
 
 
     
