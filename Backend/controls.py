@@ -10,7 +10,7 @@ class Control:
     #Starten
     def takeoff(self):
         self.drone.flight.takeoff()
-
+    
     #Landen
     def land(self):
         self.drone.flight.land()
@@ -40,7 +40,7 @@ class Control:
         self.drone.flight.turn_left(angle)
 
     def rotate_right(self, angle=45):
-        self.drone.flight.turn_right(angle)
+        self.drone.fl   ight.turn_right(angle)
 
     #Stopp function
     def emergency_stop(self):
