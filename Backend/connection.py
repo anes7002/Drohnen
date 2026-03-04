@@ -24,7 +24,3 @@ class DroneConnection:
         if self.socket:
             self.socket.close()
         self.connected = False
-
-   
-
-        
