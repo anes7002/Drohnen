@@ -1,5 +1,6 @@
 import socket
 
+
 class DroneConnection:
     DRONE_PORT = 8888
     CONNECTION_TIMEOUT = 5
