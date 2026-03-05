@@ -126,4 +126,5 @@ flutter_*.log
 Thumbs.db
 ehthumbs.db
 Desktop.ini
+Frontend/drohnen_fronted/pubspec.yaml
 Frontend/drohnen_fronted/pubspec.lock
