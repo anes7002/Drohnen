@@ -1,6 +1,4 @@
 import time
-from robomaster import robot
-import keyboard
 
 class Control:
 
@@ -12,7 +10,8 @@ class Control:
         self.drone.flight.takeoff()
     
     def land(self):
-        self.drone.flight.land()
+        print("[INFO] Landing...")
+        self.connection.send_command("land")
 
     def send_rc(self, forward, right, up, yaw):
         self.drone.flight.rc(forward, right, up, yaw)
