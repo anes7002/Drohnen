@@ -33,13 +33,18 @@ video_cap = None
 @app.post("/connect")
 async def connect(data: dict):
     global control, telemetry
-    ip = data.get("ip", "192.168.10.1")
+
+    ip = data.get("ip", "192.168.0.104")
+
     success = drone_connection.connect(ip)
+
     if success:
+        drone_connection.send_command("command")   # WICHTIG
+        drone_connection.send_command("streamon")
+
         control = Control(drone_connection)
         telemetry = Telemetry(drone_connection)
-        # Enable video stream on the drone
-        drone_connection.send_command("streamon")
+
     return {"success": success}
 
 
