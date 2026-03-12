@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import '../lib/main.dart'; 
+import 'package:drohnen_fronted/main.dart';
 
 void main() {
   testWidgets('RoboMaster TT Dashboard UI Test', (WidgetTester tester) async {
