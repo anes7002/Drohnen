@@ -33,10 +33,12 @@ video_cap = None
 @app.post("/connect")
 async def connect(data: dict):
     global control, telemetry
-
+    
     ip = data.get("ip", "192.168.0.104")
+    print(f"[DEBUG] Connect request for IP: {ip}")
 
     success = drone_connection.connect(ip)
+    print(f"[DEBUG] Connect success: {success}")
 
     if success:
         drone_connection.send_command("command")   # WICHTIG
@@ -44,6 +46,7 @@ async def connect(data: dict):
 
         control = Control(drone_connection)
         telemetry = Telemetry(drone_connection)
+        print("[DEBUG] Control and Telemetry initialized")
 
     return {"success": success}
 
@@ -160,7 +163,11 @@ async def rc_control(websocket: WebSocket):
     """WebSocket for real-time RC joystick control."""
     await websocket.accept()
 
+    # Log connection attempt
+    print(f"[DEBUG] WebSocket /rc requested. drone_connection.connected={drone_connection.connected}")
+
     if not drone_connection.connected or control is None:
+        print("[DEBUG] Closing WebSocket /rc: Drone not connected or control not initialized")
         await websocket.send_json({"error": "Not connected"})
         await websocket.close()
         return
@@ -169,6 +176,19 @@ async def rc_control(websocket: WebSocket):
         while True:
             data = await websocket.receive_text()
             msg = json.loads(data)
+            
+            # Check for high-level commands first
+            cmd = msg.get("command")
+            if cmd:
+                if cmd == "takeoff":
+                    control.takeoff()
+                elif cmd == "land":
+                    control.land()
+                elif cmd == "emergency":
+                    control.emergency_stop()
+                continue  # Skip RC values if it's a discrete command
+
+            # Normal RC control
             a = int(msg.get("a", 0))
             b = int(msg.get("b", 0))
             c = int(msg.get("c", 0))
