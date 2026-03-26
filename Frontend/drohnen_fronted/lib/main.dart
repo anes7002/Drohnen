@@ -295,6 +295,11 @@ class _DroneDashboardState extends State<DroneDashboard> {
   String droneHeight = '---';
   String droneSpeed = '---';
   String droneTime = '---';
+
+  // RC Control State
+  final FocusNode _focusNode = FocusNode();
+  final Set<LogicalKeyboardKey> _pressedKeys = {};
+  int _a = 0, _b = 0, _c = 0, _d = 0;
  
   @override
   void initState() {
@@ -382,11 +387,65 @@ class _DroneDashboardState extends State<DroneDashboard> {
       _rcChannel!.sink.add(jsonEncode({"command": command}));
     }
   }
+
+  @override
+  void dispose() {
+    _focusNode.dispose();
+    _rcChannel?.sink.close();
+    super.dispose();
+  }
+
+  void _updateRC() {
+    if (isConnected && _rcChannel != null) {
+      _rcChannel!.sink.add(jsonEncode({"a": _a, "b": _b, "c": _c, "d": _d}));
+    }
+  }
+
+  KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
+    if (!isConnected) return KeyEventResult.ignored;
+
+    if (event is KeyDownEvent) {
+      _pressedKeys.add(event.logicalKey);
+    } else if (event is KeyUpEvent) {
+      _pressedKeys.remove(event.logicalKey);
+    } else {
+      return KeyEventResult.ignored;
+    }
+
+    int newA = 0, newB = 0, newC = 0, newD = 0;
+    int speed = 100;
+
+    if (_pressedKeys.contains(LogicalKeyboardKey.keyW)) newB = speed;
+    if (_pressedKeys.contains(LogicalKeyboardKey.keyS)) newB = (newB == 0) ? -speed : 0;
+
+    if (_pressedKeys.contains(LogicalKeyboardKey.keyD)) newA = speed;
+    if (_pressedKeys.contains(LogicalKeyboardKey.keyA)) newA = (newA == 0) ? -speed : 0;
+
+    if (_pressedKeys.contains(LogicalKeyboardKey.keyI)) newC = speed;
+    if (_pressedKeys.contains(LogicalKeyboardKey.keyK)) newC = (newC == 0) ? -speed : 0;
+
+    if (_pressedKeys.contains(LogicalKeyboardKey.keyO) || _pressedKeys.contains(LogicalKeyboardKey.keyL)) newD = speed;
+    if (_pressedKeys.contains(LogicalKeyboardKey.keyJ)) newD = (newD == 0) ? -speed : 0;
+
+    if (newA != _a || newB != _b || newC != _c || newD != _d) {
+      _a = newA;
+      _b = newB;
+      _c = newC;
+      _d = newD;
+      _updateRC();
+    }
+
+    return KeyEventResult.handled;
+  }
  
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: Stack(
+    return Focus(
+      focusNode: _focusNode,
+      autofocus: true,
+      onKeyEvent: _handleKeyEvent,
+      child: Scaffold(
+        body: Stack(
         children: [
           Container(
             width: double.infinity,
@@ -422,7 +481,7 @@ class _DroneDashboardState extends State<DroneDashboard> {
           ),
         ],
       ),
-    );
+    )); // Focus
   }
  
   Widget _buildTopHUD() {

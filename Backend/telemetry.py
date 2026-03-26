@@ -27,7 +27,7 @@ class Telemetry:
                 if isinstance(res, str):
                     lower_res = res.lower().strip()
                     # Filter out non-numeric noise like "ok", "error", or attitude strings
-                    if lower_res == "ok" or ";" in res or ":" in res:
+                    if lower_res == "ok" or lower_res == "error" or ";" in res or ":" in res or "~" in res or "s" in lower_res:
                         return "---"
                     
                     import re
@@ -51,7 +51,8 @@ class Telemetry:
                     return "0 °C"
                 
                 # Filter out corrupted attitude/battery/height strings
-                if ";" in res or ":" in res or "dm" in res or "ok" in res:
+                lower_res = res.lower().strip()
+                if ";" in res or ":" in res or "dm" in res or lower_res == "ok" or lower_res == "error" or "s" in lower_res:
                     return "---"
 
                 # Tello returns '85~88C'
@@ -87,6 +88,9 @@ class Telemetry:
                 # Fallback to the set speed if live velocity fails
                 res = self.drone.send_command_with_response("speed?")
                 if isinstance(res, str):
+                    lower_res = res.lower().strip()
+                    if lower_res == "ok" or lower_res == "error" or ";" in res or ":" in res or "~" in res or "dm" in res or "s" in lower_res:
+                        return "---"
                     import re
                     match = re.search(r'(\d+)', res)
                     if match:
@@ -102,8 +106,8 @@ class Telemetry:
                 res = self.drone.send_command_with_response("time?")
                 if isinstance(res, str):
                     lower_res = res.lower().strip()
-                    if lower_res == "ok" or ";" in res or ":" in res:
-                        return "0s"
+                    if lower_res == "ok" or lower_res == "error" or ";" in res or ":" in res or "~" in res or "dm" in res:
+                        return "---"
                     import re
                     match = re.search(r'(\d+)', res)
                     return f"{match.group(1)}s" if match else "0s"
@@ -131,7 +135,7 @@ class Telemetry:
                     if isinstance(res, str):
                         lower_res = res.lower().strip()
                         # Filter out corrupted strings or "ok" confirmation
-                        if lower_res == "ok" or ";" in res or ":" in res or "~" in res or "dm" in res:
+                        if lower_res == "ok" or lower_res == "error" or ";" in res or ":" in res or "~" in res or "dm" in res or "s" in lower_res:
                             return "---"
                         
                         import re
