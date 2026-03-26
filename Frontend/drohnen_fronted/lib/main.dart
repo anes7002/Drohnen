@@ -1,6 +1,9 @@
 import 'dart:ui';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
+import 'package:web_socket_channel/web_socket_channel.dart';
  
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -285,6 +288,13 @@ class _DroneDashboardState extends State<DroneDashboard> {
   bool isRecording = false;
   bool aiVisionEnabled = false;
   bool ringModeEnabled = false;
+
+  final String backendHost = '127.0.0.1:8000'; // Bei Android Emulator ggf. auf 10.0.2.2:8000 ändern
+  WebSocketChannel? _rcChannel;
+  String batteryLevel = '---';
+  String droneHeight = '---';
+  String droneSpeed = '---';
+  String droneTime = '---';
  
   @override
   void initState() {
@@ -292,17 +302,84 @@ class _DroneDashboardState extends State<DroneDashboard> {
     ipAddress = widget.initialIp;
   }
  
-  void toggleConnection() {
-    setState(() {
-      isConnected = !isConnected;
-    });
-    if (!isConnected) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Verbindung getrennt.'),
-          backgroundColor: Colors.orange,
-        ),
-      );
+  Future<void> toggleConnection() async {
+    if (isConnected) {
+      // Trennen
+      try {
+        await http.post(Uri.parse('http://$backendHost/disconnect'));
+      } catch (e) {
+        debugPrint('Error disconnecting: $e');
+      }
+      _rcChannel?.sink.close();
+      
+      if (mounted) {
+        setState(() {
+          isConnected = false;
+          batteryLevel = '---';
+          droneHeight = '---';
+          droneSpeed = '---';
+          droneTime = '---';
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Verbindung getrennt.'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
+    } else {
+      // Verbinden
+      try {
+        final res = await http.post(
+          Uri.parse('http://$backendHost/connect'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({'ip': ipAddress}),
+        );
+        final data = jsonDecode(res.body);
+        if (data['success'] == true) {
+          _rcChannel = WebSocketChannel.connect(Uri.parse('ws://$backendHost/rc'));
+          _rcChannel!.stream.listen((message) {
+            final msgData = jsonDecode(message);
+            if (msgData['type'] == 'telemetry') {
+              final tele = msgData['data'];
+              if (mounted) {
+                setState(() {
+                  batteryLevel = (tele['battery']?.toString() ?? '---').replaceAll('%', '');
+                  droneHeight = tele['height']?.toString() ?? '---';
+                  droneSpeed = tele['speed']?.toString() ?? '---';
+                  droneTime = tele['flight_time']?.toString() ?? '---';
+                });
+              }
+            }
+          });
+          if (mounted) {
+            setState(() {
+              isConnected = true;
+            });
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Verbunden!'), backgroundColor: Colors.green),
+            );
+          }
+        } else {
+          throw Exception('${data['error']}');
+        }
+      } catch (e) {
+        debugPrint('Fehler beim Verbinden: $e');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Fehler beim Verbinden: $e'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+      }
+    }
+  }
+
+  void _sendCommand(String command) {
+    if (isConnected && _rcChannel != null) {
+      _rcChannel!.sink.add(jsonEncode({"command": command}));
     }
   }
  
@@ -399,7 +476,7 @@ class _DroneDashboardState extends State<DroneDashboard> {
                 const SizedBox(width: 15),
                 const Icon(Icons.battery_charging_full, color: Colors.greenAccent),
                 const SizedBox(width: 5),
-                const Text('85%', style: TextStyle(fontWeight: FontWeight.bold)),
+                Text('$batteryLevel%', style: const TextStyle(fontWeight: FontWeight.bold)),
               ],
             ),
           ],
@@ -469,18 +546,18 @@ class _DroneDashboardState extends State<DroneDashboard> {
         const SizedBox(height: 10),
         GlassContainer(
           width: 150,
-          child: const Padding(
-            padding: EdgeInsets.all(12.0),
+          child: Padding(
+            padding: const EdgeInsets.all(12.0),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('Höhe: 2.5 m', style: TextStyle(color: Colors.greenAccent)),
-                SizedBox(height: 5),
-                Text('Speed: 1.2 m/s'),
-                SizedBox(height: 5),
-                Text('Distanz: 45 m'),
-                SizedBox(height: 5),
-                Text('Zeit: 04:12 min'),
+                Text('Höhe: $droneHeight', style: const TextStyle(color: Colors.greenAccent)),
+                const SizedBox(height: 5),
+                Text('Speed: $droneSpeed'),
+                const SizedBox(height: 5),
+                Text('Distanz: ---'), // Distance ist in der aktuellen Telemetrie nicht direkt verfügbar
+                const SizedBox(height: 5),
+                Text('Zeit: $droneTime'),
               ],
             ),
           ),
@@ -500,14 +577,14 @@ class _DroneDashboardState extends State<DroneDashboard> {
             Row(
               children: [
                 ElevatedButton.icon(
-                  onPressed: isConnected ? () {} : null,
+                  onPressed: isConnected ? () => _sendCommand('takeoff') : null,
                   icon: const Icon(Icons.flight_takeoff),
                   label: const Text('Start'),
                   style: ElevatedButton.styleFrom(backgroundColor: Colors.blueGrey),
                 ),
                 const SizedBox(width: 20),
                 ElevatedButton.icon(
-                  onPressed: isConnected ? () {} : null,
+                  onPressed: isConnected ? () => _sendCommand('land') : null,
                   icon: const Icon(Icons.flight_land),
                   label: const Text('Landen'),
                   style: ElevatedButton.styleFrom(backgroundColor: Colors.blueGrey),
@@ -516,7 +593,7 @@ class _DroneDashboardState extends State<DroneDashboard> {
             ),
             const SizedBox(height: 15),
             InkWell(
-              onTap: () {},
+              onTap: () => _sendCommand('emergency'),
               child: Container(
                 width: 150,
                 height: 50,
