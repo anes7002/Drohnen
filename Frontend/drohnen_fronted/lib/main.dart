@@ -401,6 +401,115 @@ class _DroneDashboardState extends State<DroneDashboard> {
     }
   }
 
+  Future<void> _executeCourse(List<Map<String, dynamic>> commands) async {
+    Navigator.of(context).pop(); // Dialog schließen
+    
+    if (!isConnected) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Nicht verbunden!'), backgroundColor: Colors.red),
+      );
+      return;
+    }
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Flugkurs gestartet...'), backgroundColor: Colors.blue),
+    );
+
+    for (var cmd in commands) {
+      if (!isConnected) break; // Abbrechen, falls Verbindung getrennt wird
+      
+      try {
+        await http.post(
+          Uri.parse('http://$backendHost/command'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode(cmd),
+        );
+        
+        // Pausen einbauen, weil das Backend die Befehle asynchron sendet.
+        // Die Drohne braucht Zeit für das Manöver.
+        int delaySeconds = (cmd['command'] == 'takeoff' || cmd['command'] == 'land') ? 5 : 4;
+        await Future.delayed(Duration(seconds: delaySeconds));
+      } catch (e) {
+        debugPrint('Fehler bei Flugkurs-Befehl: $e');
+      }
+    }
+
+    if (mounted && isConnected) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Flugkurs beendet!'), backgroundColor: Colors.green),
+      );
+    }
+  }
+
+  void _showFlightCoursesDialog() {
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          backgroundColor: Colors.grey[900],
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+          title: const Row(
+            children: [
+              Icon(Icons.route, color: Colors.blueAccent),
+              SizedBox(width: 10),
+              Text('Flugkurse', style: TextStyle(color: Colors.white)),
+            ],
+          ),
+          content: SizedBox(
+            width: 300,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ListTile(
+                  leading: const Icon(Icons.crop_square, color: Colors.white),
+                  title: const Text('Viereck fliegen', style: TextStyle(color: Colors.white)),
+                  subtitle: const Text('Takeoff -> 4x Seiten -> Land', style: TextStyle(color: Colors.white54)),
+                  onTap: () => _executeCourse([
+                    {"command": "takeoff"},
+                    {"command": "forward", "args": {"distance": 50}},
+                    {"command": "right", "args": {"distance": 50}},
+                    {"command": "backward", "args": {"distance": 50}},
+                    {"command": "left", "args": {"distance": 50}},
+                    {"command": "land"},
+                  ]),
+                ),
+                const Divider(color: Colors.white24),
+                ListTile(
+                  leading: const Icon(Icons.swap_vert, color: Colors.white),
+                  title: const Text('Fahrstuhl', style: TextStyle(color: Colors.white)),
+                  subtitle: const Text('Start -> Hoch -> Runter -> Landen', style: TextStyle(color: Colors.white54)),
+                  onTap: () => _executeCourse([
+                    {"command": "takeoff"},
+                    {"command": "up", "args": {"distance": 50}},
+                    {"command": "down", "args": {"distance": 50}},
+                    {"command": "land"},
+                  ]),
+                ),
+                const Divider(color: Colors.white24),
+                ListTile(
+                  leading: const Icon(Icons.rotate_right, color: Colors.white),
+                  title: const Text('Pirouette', style: TextStyle(color: Colors.white)),
+                  subtitle: const Text('Dreht sich einmal um 360°', style: TextStyle(color: Colors.white54)),
+                  onTap: () => _executeCourse([
+                    {"command": "takeoff"},
+                    {"command": "rotate_right", "args": {"angle": 360}},
+                    {"command": "land"},
+                  ]),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Schließen', style: TextStyle(color: Colors.redAccent)),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
     if (!isConnected) return KeyEventResult.ignored;
 
@@ -559,7 +668,7 @@ class _DroneDashboardState extends State<DroneDashboard> {
         _buildHudButton(
           icon: Icons.list_alt,
           label: 'Flugkurse',
-          onTap: () {},
+          onTap: _showFlightCoursesDialog,
         ),
         const SizedBox(height: 15),
         _buildHudButton(
