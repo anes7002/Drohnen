@@ -299,7 +299,7 @@ class _DroneDashboardState extends State<DroneDashboard> {
     if (!isConnected) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Verbindung getrennt. Drohne im Hover-Modus.'),
+          content: Text('Verbindung getrennt.'),
           backgroundColor: Colors.orange,
         ),
       );
@@ -315,12 +315,7 @@ class _DroneDashboardState extends State<DroneDashboard> {
             width: double.infinity,
             height: double.infinity,
             decoration: BoxDecoration(
-              color: Colors.grey[900],
-              image: const DecorationImage(
-                image: NetworkImage('https://images.unsplash.com/photo-1473968512647-3e447244af8f?q=80&w=2070'),
-                fit: BoxFit.cover,
-                opacity: 0.5,
-              ),
+              color: Colors.grey[900]
             ),
             child: const Center(
               child: Icon(Icons.videocam_outlined, size: 100, color: Colors.white24),
