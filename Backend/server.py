@@ -43,6 +43,8 @@ async def connect(data: dict):
     if success:
         drone_connection.send_command("command")   # WICHTIG
         drone_connection.send_command("streamon")
+        # Set speed to maximum (100) on connection
+        drone_connection.send_command("speed 100")
 
         control = Control(drone_connection)
         telemetry = Telemetry(drone_connection)
@@ -160,7 +162,7 @@ async def video_stream(websocket: WebSocket):
 
 @app.websocket("/rc")
 async def rc_control(websocket: WebSocket):
-    """WebSocket for real-time RC joystick control."""
+    """WebSocket for real-time RC joystick control and telemetry updates."""
     await websocket.accept()
 
     # Log connection attempt
@@ -171,6 +173,23 @@ async def rc_control(websocket: WebSocket):
         await websocket.send_json({"error": "Not connected"})
         await websocket.close()
         return
+
+    # Task to send telemetry every second
+    async def send_telemetry():
+        try:
+            while True:
+                if websocket.client_state.value == 1:
+                    if telemetry:
+                        data = telemetry.get_all_telemetry()
+                        await websocket.send_json({"type": "telemetry", "data": data})
+                else:
+                    break
+                await asyncio.sleep(1)
+        except:
+            pass
+
+    # Start telemetry sender as background task
+    tele_task = asyncio.create_task(send_telemetry())
 
     try:
         while True:
@@ -195,7 +214,11 @@ async def rc_control(websocket: WebSocket):
             d = int(msg.get("d", 0))
             control.send_rc(a, b, c, d)
     except WebSocketDisconnect:
+        print("[DEBUG] WebSocket /rc disconnected")
         control.send_rc(0, 0, 0, 0)
+    finally:
+        tele_task.cancel()
+
 
 
 if __name__ == "__main__":
