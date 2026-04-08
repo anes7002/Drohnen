@@ -1,506 +1,858 @@
-import 'dart:async';
+import 'dart:ui';
 import 'dart:convert';
-import 'dart:typed_data';
-
 import 'package:flutter/material.dart';
-import 'package:flutter_joystick/flutter_joystick.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
-import 'package:provider/provider.dart';
-
+ 
 void main() {
-  runApp(
-    ChangeNotifierProvider(
-      create: (_) => DroneState(),
-      child: const RoboMasterApp(),
-    ),
-  );
+  WidgetsFlutterBinding.ensureInitialized();
+  // Erzwinge Querformat für die Drohnen-Steuerung
+  SystemChrome.setPreferredOrientations([
+    DeviceOrientation.landscapeRight,
+    DeviceOrientation.landscapeLeft,
+  ]).then((_) {
+    runApp(const RoboMasterApp());
+  });
 }
-
+ 
 class RoboMasterApp extends StatelessWidget {
-  const RoboMasterApp({super.key});
-
+  const RoboMasterApp({Key? key}) : super(key: key);
+ 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Drohnen Steuerung',
+      title: 'RoboMaster TT Control',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData.dark().copyWith(
-        colorScheme: ColorScheme.dark(
-          primary: Colors.blue,
-          secondary: Colors.blueAccent,
-          surface: const Color(0xFF1E1E1E),
-        ),
-        scaffoldBackgroundColor: const Color(0xFF121212),
+      theme: ThemeData(
+        brightness: Brightness.dark,
+        primarySwatch: Colors.blue,
+        scaffoldBackgroundColor: Colors.black,
+        fontFamily: 'Roboto',
       ),
-      home: const DroneControlScreen(),
+      home: const IpEntryScreen(),
     );
   }
 }
-
-// --- State Management ---
-
-class DroneState extends ChangeNotifier {
-  String _serverIp = '192.168.10.1';
-  String _serverPort = '8000';
-  bool _connected = false;
-  bool _flying = false;
-  String? _error;
-
-  // Telemetry
-  String _battery = '--';
-  String _height = '--';
-  String _temperature = '--';
-  String _speed = '--';
-  String _flightTime = '--';
-
-  // Video
-  Uint8List? _currentFrame;
-  WebSocketChannel? _videoChannel;
-  WebSocketChannel? _rcChannel;
-  Timer? _telemetryTimer;
-
-  String get serverIp => _serverIp;
-  String get serverPort => _serverPort;
-  bool get connected => _connected;
-  bool get flying => _flying;
-  String? get error => _error;
-  String get battery => _battery;
-  String get height => _height;
-  String get temperature => _temperature;
-  String get speed => _speed;
-  String get flightTime => _flightTime;
-  Uint8List? get currentFrame => _currentFrame;
-
-  String get _baseUrl => 'http://$_serverIp:$_serverPort';
-  String get _wsUrl => 'ws://$_serverIp:$_serverPort';
-
-  void setServerIp(String ip) {
-    _serverIp = ip;
-    notifyListeners();
-  }
-
-  void setServerPort(String port) {
-    _serverPort = port;
-    notifyListeners();
-  }
-
-  Future<void> connect() async {
-    try {
-      _error = null;
-      notifyListeners();
-
-      final response = await http.post(
-        Uri.parse('$_baseUrl/connect'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'ip': _serverIp}),
-      ).timeout(const Duration(seconds: 15));
-
-      final data = jsonDecode(response.body);
-      if (data['success'] == true) {
-        _connected = true;
-        _startVideoStream();
-        _startTelemetryPolling();
-        _connectRcChannel();
-      } else {
-        _error = 'Verbindung fehlgeschlagen';
-      }
-    } catch (e) {
-      _error = 'Server nicht erreichbar: $e';
-    }
-    notifyListeners();
-  }
-
-  Future<void> disconnect() async {
-    try {
-      await http.post(
-        Uri.parse('$_baseUrl/disconnect'),
-        headers: {'Content-Type': 'application/json'},
-      );
-    } catch (_) {}
-    _cleanup();
-    _connected = false;
-    _flying = false;
-    notifyListeners();
-  }
-
-  void _cleanup() {
-    _telemetryTimer?.cancel();
-    _telemetryTimer = null;
-    _videoChannel?.sink.close();
-    _videoChannel = null;
-    _rcChannel?.sink.close();
-    _rcChannel = null;
-    _currentFrame = null;
-  }
-
-  void _startVideoStream() {
-    _videoChannel = WebSocketChannel.connect(Uri.parse('$_wsUrl/video'));
-    _videoChannel!.stream.listen(
-      (data) {
-        if (data is String) {
-          _currentFrame = base64Decode(data);
-          notifyListeners();
-        }
-      },
-      onError: (_) {},
-      onDone: () {},
-    );
-  }
-
-  void _connectRcChannel() {
-    _rcChannel = WebSocketChannel.connect(Uri.parse('$_wsUrl/rc'));
-  }
-
-  void sendRc(int a, int b, int c, int d) {
-    if (_rcChannel != null && _connected) {
-      _rcChannel!.sink.add(jsonEncode({'a': a, 'b': b, 'c': c, 'd': d}));
-    }
-  }
-
-  void _startTelemetryPolling() {
-    _telemetryTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
-      if (!_connected) return;
-      try {
-        final response = await http.get(
-          Uri.parse('$_baseUrl/telemetry'),
-        ).timeout(const Duration(seconds: 5));
-        final data = jsonDecode(response.body);
-        if (data['success'] == true) {
-          final t = data['data'];
-          _battery = '${t['battery']}';
-          _height = '${t['height']}';
-          _temperature = '${t['temp']}';
-          _speed = '${t['speed']}';
-          _flightTime = '${t['flight_time']}';
-          notifyListeners();
-        }
-      } catch (_) {}
-    });
-  }
-
-  Future<void> sendCommand(String command, {Map<String, dynamic>? args}) async {
-    if (!_connected) return;
-    try {
-      await http.post(
-        Uri.parse('$_baseUrl/command'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'command': command, 'args': args ?? {}}),
-      );
-      if (command == 'takeoff') {
-        _flying = true;
-        notifyListeners();
-      } else if (command == 'land' || command == 'emergency') {
-        _flying = false;
-        notifyListeners();
-      }
-    } catch (e) {
-      _error = 'Befehl fehlgeschlagen: $e';
-      notifyListeners();
-    }
-  }
-
-  @override
-  void dispose() {
-    _cleanup();
-    super.dispose();
-  }
+ 
+// ==========================================
+// Hilfsklasse für die Drohnen-Daten
+// ==========================================
+class DroneItem {
+  final String name;
+  final String ip;
+ 
+  DroneItem({required this.name, required this.ip});
 }
-
-// --- Main Screen ---
-
-class DroneControlScreen extends StatefulWidget {
-  const DroneControlScreen({super.key});
-
+ 
+// ==========================================
+// Bildschirm für die IP-Eingabe (Start)
+// ==========================================
+class IpEntryScreen extends StatefulWidget {
+  const IpEntryScreen({Key? key}) : super(key: key);
+ 
   @override
-  State<DroneControlScreen> createState() => _DroneControlScreenState();
+  State<IpEntryScreen> createState() => _IpEntryScreenState();
 }
-
-class _DroneControlScreenState extends State<DroneControlScreen> {
+ 
+class _IpEntryScreenState extends State<IpEntryScreen> {
+  final TextEditingController _nameController = TextEditingController();
   final TextEditingController _ipController = TextEditingController(text: '192.168.10.1');
-  final TextEditingController _portController = TextEditingController(text: '8000');
-
+ 
+  // Unsere Liste für die Drohnen
+  List<DroneItem> _droneList = [];
+ 
+  // Die aktuell ausgewählte Drohne
+  DroneItem? _selectedDrone;
+ 
+  void _addDroneToList() {
+    final name = _nameController.text.trim();
+    final ip = _ipController.text.trim();
+ 
+    if (name.isNotEmpty && ip.isNotEmpty) {
+      setState(() {
+        _droneList.add(DroneItem(name: name, ip: ip));
+        // Felder leeren für die nächste Eingabe (optional, IP bleibt bei dir vielleicht oft gleich,
+        // aber wir löschen hier mal den Namen)
+        _nameController.clear();
+      });
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Bitte Name und IP-Adresse eingeben!'),
+          backgroundColor: Colors.redAccent,
+        ),
+      );
+    }
+  }
+ 
+  void _connectToDrone() {
+    if (_selectedDrone == null) return;
+ 
+    // Gehe zum nächsten Fenster und übergebe die IP der AUSGEWÄHLTEN Drohne
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(
+        builder: (context) => DroneDashboard(initialIp: _selectedDrone!.ip),
+      ),
+    );
+  }
+ 
   @override
   Widget build(BuildContext context) {
-    final drone = context.watch<DroneState>();
-    final isLandscape = MediaQuery.of(context).orientation == Orientation.landscape;
-
     return Scaffold(
-      body: SafeArea(
-        child: isLandscape ? _buildLandscapeLayout(drone) : _buildPortraitLayout(drone),
-      ),
-    );
-  }
-
-  Widget _buildPortraitLayout(DroneState drone) {
-    return Column(
-      children: [
-        _buildConnectionBar(drone),
-        if (drone.error != null) _buildErrorBanner(drone.error!),
-        Expanded(child: _buildVideoFeed(drone)),
-        _buildTelemetryBar(drone),
-        _buildControlArea(drone),
-      ],
-    );
-  }
-
-  Widget _buildLandscapeLayout(DroneState drone) {
-    return Row(
-      children: [
-        Expanded(
-          flex: 3,
-          child: Column(
-            children: [
-              _buildConnectionBar(drone),
-              if (drone.error != null) _buildErrorBanner(drone.error!),
-              Expanded(child: _buildVideoFeed(drone)),
-              _buildTelemetryBar(drone),
-            ],
+      body: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Colors.black, Colors.grey[900]!, Colors.blueGrey[900]!],
           ),
         ),
-        SizedBox(
-          width: 300,
-          child: _buildControlArea(drone),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildConnectionBar(DroneState drone) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      color: const Color(0xFF1E1E1E),
-      child: Row(
-        children: [
-          Icon(
-            Icons.circle,
-            size: 12,
-            color: drone.connected ? Colors.green : Colors.red,
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: SizedBox(
-              height: 36,
-              child: TextField(
-                controller: _ipController,
-                enabled: !drone.connected,
-                style: const TextStyle(fontSize: 13),
-                decoration: const InputDecoration(
-                  hintText: 'Drohnen IP',
-                  contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                  border: OutlineInputBorder(),
-                  isDense: true,
+        child: Center(
+          child: SingleChildScrollView(
+            child: GlassContainer(
+              // Box breiter gemacht, um Liste und Eingabe nebeneinander zu zeigen
+              width: 650,
+              child: Padding(
+                padding: const EdgeInsets.all(24.0),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Icon(Icons.flight_takeoff, size: 40, color: Colors.blueAccent),
+                    const SizedBox(height: 10),
+                    const Text(
+                      'LAGA-Drohnenmanager',
+                      style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 20),
+                   
+                    // Layout aufgeteilt in Links (Eingabe) und Rechts (Liste)
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        // LINKE SEITE: Eingabefelder
+                        Expanded(
+                          flex: 1,
+                          child: Column(
+                            children: [
+                              TextField(
+                                controller: _nameController,
+                                decoration: InputDecoration(
+                                  labelText: 'Drohnen-Name',
+                                  prefixIcon: const Icon(Icons.label),
+                                  border: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(10),
+                                  ),
+                                  filled: true,
+                                  fillColor: Colors.black26,
+                                  isDense: true,
+                                ),
+                              ),
+                              const SizedBox(height: 15),
+                              TextField(
+                                controller: _ipController,
+                                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                                decoration: InputDecoration(
+                                  labelText: 'IP-Adresse',
+                                  prefixIcon: const Icon(Icons.wifi),
+                                  border: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(10),
+                                  ),
+                                  filled: true,
+                                  fillColor: Colors.black26,
+                                  isDense: true,
+                                ),
+                              ),
+                              const SizedBox(height: 15),
+                              SizedBox(
+                                width: double.infinity,
+                                child: ElevatedButton.icon(
+                                  onPressed: _addDroneToList,
+                                  icon: const Icon(Icons.add),
+                                  label: const Text('ZUR LISTE HINZUFÜGEN'),
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: Colors.blueGrey,
+                                    foregroundColor: Colors.white,
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(10),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                       
+                        const SizedBox(width: 20),
+                       
+                        // RECHTE SEITE: Die Liste
+                        Expanded(
+                          flex: 1,
+                          child: Container(
+                            height: 190, // Feste Höhe für die Liste
+                            decoration: BoxDecoration(
+                              color: Colors.black26,
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(color: Colors.white24),
+                            ),
+                            child: _droneList.isEmpty
+                                ? const Center(
+                                    child: Text(
+                                      'Noch keine Drohnen hinzugefügt.',
+                                      style: TextStyle(color: Colors.white54),
+                                    ),
+                                  )
+                                : ListView.builder(
+                                    itemCount: _droneList.length,
+                                    itemBuilder: (context, index) {
+                                      final drone = _droneList[index];
+                                      final isSelected = drone == _selectedDrone;
+ 
+                                      return ListTile(
+                                        leading: Icon(
+                                          Icons.airplanemode_active,
+                                          color: isSelected ? Colors.white : Colors.blueAccent,
+                                        ),
+                                        title: Text(drone.name, style: const TextStyle(fontWeight: FontWeight.bold)),
+                                        subtitle: Text(drone.ip),
+                                        selected: isSelected,
+                                        selectedTileColor: Colors.blueAccent.withOpacity(0.5),
+                                        shape: RoundedRectangleBorder(
+                                          borderRadius: BorderRadius.circular(8),
+                                        ),
+                                        onTap: () {
+                                          setState(() {
+                                            _selectedDrone = drone;
+                                          });
+                                        },
+                                      );
+                                    },
+                                  ),
+                          ),
+                        ),
+                      ],
+                    ),
+                   
+                    const SizedBox(height: 25),
+                   
+                    // BOTTOM: Weiter-Button
+                    SizedBox(
+                      width: double.infinity,
+                      height: 50,
+                      child: ElevatedButton(
+                        // Button ist nur klickbar, wenn eine Drohne ausgewählt wurde!
+                        onPressed: _selectedDrone == null ? null : _connectToDrone,
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.blueAccent,
+                          disabledBackgroundColor: Colors.blueAccent.withOpacity(0.3),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                        ),
+                        child: Text(
+                          _selectedDrone == null
+                              ? 'BITTE DROHNE AUSWÄHLEN'
+                              : 'VERBINDEN MIT "${_selectedDrone!.name.toUpperCase()}"',
+                          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
-                onChanged: (v) => drone.setServerIp(v),
               ),
             ),
           ),
-          const SizedBox(width: 6),
-          SizedBox(
-            width: 70,
-            height: 36,
-            child: TextField(
-              controller: _portController,
-              enabled: !drone.connected,
-              style: const TextStyle(fontSize: 13),
-              decoration: const InputDecoration(
-                hintText: 'Port',
-                contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                border: OutlineInputBorder(),
-                isDense: true,
-              ),
-              onChanged: (v) => drone.setServerPort(v),
-            ),
-          ),
-          const SizedBox(width: 8),
-          ElevatedButton(
-            onPressed: drone.connected ? drone.disconnect : drone.connect,
-            style: ElevatedButton.styleFrom(
-              backgroundColor: drone.connected ? Colors.red : Colors.green,
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            ),
-            child: Text(
-              drone.connected ? 'Trennen' : 'Verbinden',
-              style: const TextStyle(fontSize: 13, color: Colors.white),
-            ),
-          ),
-        ],
+        ),
       ),
     );
   }
+}
+ 
+// ==========================================
+// DAS DASHBOARD (HUD)
+// ==========================================
+class DroneDashboard extends StatefulWidget {
+  final String initialIp;
+ 
+  const DroneDashboard({Key? key, required this.initialIp}) : super(key: key);
+ 
+  @override
+  State<DroneDashboard> createState() => _DroneDashboardState();
+}
+ 
+class _DroneDashboardState extends State<DroneDashboard> {
+  bool isConnected = false;
+  late String ipAddress;
+  bool isRecording = false;
+  bool aiVisionEnabled = false;
+  bool ringModeEnabled = false;
 
-  Widget _buildErrorBanner(String message) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      color: Colors.red.shade900,
-      child: Text(message, style: const TextStyle(fontSize: 12, color: Colors.white)),
-    );
+  final String backendHost = '127.0.0.1:8000'; // Bei Android Emulator ggf. auf 10.0.2.2:8000 ändern
+  WebSocketChannel? _rcChannel;
+  String batteryLevel = '---';
+  String droneHeight = '---';
+  String droneSpeed = '---';
+  String droneTime = '---';
+
+  // RC Control State
+  final FocusNode _focusNode = FocusNode();
+  final Set<LogicalKeyboardKey> _pressedKeys = {};
+  int _a = 0, _b = 0, _c = 0, _d = 0;
+ 
+  @override
+  void initState() {
+    super.initState();
+    ipAddress = widget.initialIp;
   }
-
-  Widget _buildVideoFeed(DroneState drone) {
-    return Container(
-      color: Colors.black,
-      child: drone.currentFrame != null
-          ? Image.memory(
-              drone.currentFrame!,
-              fit: BoxFit.contain,
-              gaplessPlayback: true,
-              width: double.infinity,
-              height: double.infinity,
-            )
-          : Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.videocam_off, size: 64, color: Colors.grey.shade700),
-                  const SizedBox(height: 8),
-                  Text(
-                    drone.connected ? 'Warte auf Video...' : 'Kein Videosignal',
-                    style: TextStyle(color: Colors.grey.shade600, fontSize: 16),
-                  ),
-                ],
-              ),
+ 
+  Future<void> toggleConnection() async {
+    if (isConnected) {
+      // Trennen
+      try {
+        await http.post(Uri.parse('http://$backendHost/disconnect'));
+      } catch (e) {
+        debugPrint('Error disconnecting: $e');
+      }
+      _rcChannel?.sink.close();
+      
+      if (mounted) {
+        setState(() {
+          isConnected = false;
+          batteryLevel = '---';
+          droneHeight = '---';
+          droneSpeed = '---';
+          droneTime = '---';
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Verbindung getrennt.'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
+    } else {
+      // Verbinden
+      try {
+        final res = await http.post(
+          Uri.parse('http://$backendHost/connect'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({'ip': ipAddress}),
+        );
+        final data = jsonDecode(res.body);
+        if (data['success'] == true) {
+          _rcChannel = WebSocketChannel.connect(Uri.parse('ws://$backendHost/rc'));
+          _rcChannel!.stream.listen((message) {
+            final msgData = jsonDecode(message);
+            if (msgData['type'] == 'telemetry') {
+              final tele = msgData['data'];
+              if (mounted) {
+                setState(() {
+                  batteryLevel = (tele['battery']?.toString() ?? '---').replaceAll('%', '');
+                  droneHeight = tele['height']?.toString() ?? '---';
+                  droneSpeed = tele['speed']?.toString() ?? '---';
+                  droneTime = tele['flight_time']?.toString() ?? '---';
+                });
+              }
+            }
+          });
+          if (mounted) {
+            setState(() {
+              isConnected = true;
+            });
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Verbunden!'), backgroundColor: Colors.green),
+            );
+          }
+        } else {
+          throw Exception('${data['error']}');
+        }
+      } catch (e) {
+        debugPrint('Fehler beim Verbinden: $e');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Fehler beim Verbinden: $e'),
+              backgroundColor: Colors.red,
             ),
-    );
+          );
+        }
+      }
+    }
   }
 
-  Widget _buildTelemetryBar(DroneState drone) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      color: const Color(0xFF1E1E1E),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceAround,
-        children: [
-          _telemetryItem(Icons.battery_full, '${drone.battery}%', 'Batterie'),
-          _telemetryItem(Icons.height, '${drone.height} cm', 'Höhe'),
-          _telemetryItem(Icons.thermostat, '${drone.temperature}°C', 'Temp'),
-          _telemetryItem(Icons.speed, drone.speed, 'Speed'),
-          _telemetryItem(Icons.timer, '${drone.flightTime}s', 'Flugzeit'),
-        ],
-      ),
-    );
-  }
-
-  Widget _telemetryItem(IconData icon, String value, String label) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Icon(icon, size: 16, color: Colors.blueAccent),
-        Text(value, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
-        Text(label, style: const TextStyle(fontSize: 10, color: Colors.grey)),
-      ],
-    );
-  }
-
-  Widget _buildControlArea(DroneState drone) {
-    return Container(
-      padding: const EdgeInsets.all(8),
-      color: const Color(0xFF1A1A1A),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // Action buttons row
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-            children: [
-              _actionButton(
-                'Start',
-                Icons.flight_takeoff,
-                Colors.green,
-                drone.connected && !drone.flying
-                    ? () => drone.sendCommand('takeoff')
-                    : null,
-              ),
-              _actionButton(
-                'Landen',
-                Icons.flight_land,
-                Colors.orange,
-                drone.connected && drone.flying
-                    ? () => drone.sendCommand('land')
-                    : null,
-              ),
-              _actionButton(
-                'NOT STOPP',
-                Icons.dangerous,
-                Colors.red,
-                drone.connected
-                    ? () => drone.sendCommand('emergency')
-                    : null,
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          // Joysticks
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-            children: [
-              // Left joystick: up/down + yaw (rotate)
-              Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text('Höhe / Drehen', style: TextStyle(fontSize: 11, color: Colors.grey)),
-                  const SizedBox(height: 4),
-                  SizedBox(
-                    width: 130,
-                    height: 130,
-                    child: Joystick(
-                      mode: JoystickMode.all,
-                      listener: (details) {
-                        if (!drone.connected || !drone.flying) return;
-                        int d = (details.x * 100).round(); // yaw
-                        int c = (details.y * -100).round(); // up/down
-                        drone.sendRc(0, 0, c, d);
-                      },
-                    ),
-                  ),
-                ],
-              ),
-              // Right joystick: forward/backward + left/right
-              Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text('Bewegung', style: TextStyle(fontSize: 11, color: Colors.grey)),
-                  const SizedBox(height: 4),
-                  SizedBox(
-                    width: 130,
-                    height: 130,
-                    child: Joystick(
-                      mode: JoystickMode.all,
-                      listener: (details) {
-                        if (!drone.connected || !drone.flying) return;
-                        int a = (details.x * 100).round(); // left/right
-                        int b = (details.y * -100).round(); // forward/backward
-                        drone.sendRc(a, b, 0, 0);
-                      },
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _actionButton(String label, IconData icon, Color color, VoidCallback? onPressed) {
-    return ElevatedButton.icon(
-      onPressed: onPressed,
-      icon: Icon(icon, size: 18),
-      label: Text(label, style: const TextStyle(fontSize: 12)),
-      style: ElevatedButton.styleFrom(
-        backgroundColor: onPressed != null ? color : Colors.grey.shade800,
-        foregroundColor: Colors.white,
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      ),
-    );
+  void _sendCommand(String command) {
+    if (isConnected && _rcChannel != null) {
+      _rcChannel!.sink.add(jsonEncode({"command": command}));
+    }
   }
 
   @override
   void dispose() {
-    _ipController.dispose();
-    _portController.dispose();
+    _focusNode.dispose();
+    _rcChannel?.sink.close();
     super.dispose();
+  }
+
+  void _updateRC() {
+    if (isConnected && _rcChannel != null) {
+      _rcChannel!.sink.add(jsonEncode({"a": _a, "b": _b, "c": _c, "d": _d}));
+    }
+  }
+
+  Future<void> _executeCourse(List<Map<String, dynamic>> commands) async {
+    Navigator.of(context).pop(); // Dialog schließen
+    
+    if (!isConnected) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Nicht verbunden!'), backgroundColor: Colors.red),
+      );
+      return;
+    }
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Flugkurs gestartet...'), backgroundColor: Colors.blue),
+    );
+
+    for (var cmd in commands) {
+      if (!isConnected) break; // Abbrechen, falls Verbindung getrennt wird
+      
+      try {
+        await http.post(
+          Uri.parse('http://$backendHost/command'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode(cmd),
+        );
+        
+        // Pausen einbauen, weil das Backend die Befehle asynchron sendet.
+        // Die Drohne braucht Zeit für das Manöver.
+        int delaySeconds = (cmd['command'] == 'takeoff' || cmd['command'] == 'land') ? 5 : 4;
+        await Future.delayed(Duration(seconds: delaySeconds));
+      } catch (e) {
+        debugPrint('Fehler bei Flugkurs-Befehl: $e');
+      }
+    }
+
+    if (mounted && isConnected) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Flugkurs beendet!'), backgroundColor: Colors.green),
+      );
+    }
+  }
+
+  void _showFlightCoursesDialog() {
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          backgroundColor: Colors.grey[900],
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+          title: const Row(
+            children: [
+              Icon(Icons.route, color: Colors.blueAccent),
+              SizedBox(width: 10),
+              Text('Flugkurse', style: TextStyle(color: Colors.white)),
+            ],
+          ),
+          content: SizedBox(
+            width: 300,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ListTile(
+                  leading: const Icon(Icons.crop_square, color: Colors.white),
+                  title: const Text('Viereck fliegen', style: TextStyle(color: Colors.white)),
+                  subtitle: const Text('Takeoff -> 4x Seiten -> Land', style: TextStyle(color: Colors.white54)),
+                  onTap: () => _executeCourse([
+                    {"command": "takeoff"},
+                    {"command": "forward", "args": {"distance": 50}},
+                    {"command": "right", "args": {"distance": 50}},
+                    {"command": "backward", "args": {"distance": 50}},
+                    {"command": "left", "args": {"distance": 50}},
+                    {"command": "land"},
+                  ]),
+                ),
+                const Divider(color: Colors.white24),
+                ListTile(
+                  leading: const Icon(Icons.swap_vert, color: Colors.white),
+                  title: const Text('Fahrstuhl', style: TextStyle(color: Colors.white)),
+                  subtitle: const Text('Start -> Hoch -> Runter -> Landen', style: TextStyle(color: Colors.white54)),
+                  onTap: () => _executeCourse([
+                    {"command": "takeoff"},
+                    {"command": "up", "args": {"distance": 50}},
+                    {"command": "down", "args": {"distance": 50}},
+                    {"command": "land"},
+                  ]),
+                ),
+                const Divider(color: Colors.white24),
+                ListTile(
+                  leading: const Icon(Icons.rotate_right, color: Colors.white),
+                  title: const Text('Pirouette', style: TextStyle(color: Colors.white)),
+                  subtitle: const Text('Dreht sich einmal um 360°', style: TextStyle(color: Colors.white54)),
+                  onTap: () => _executeCourse([
+                    {"command": "takeoff"},
+                    {"command": "rotate_right", "args": {"angle": 360}},
+                    {"command": "land"},
+                  ]),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Schließen', style: TextStyle(color: Colors.redAccent)),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
+    if (!isConnected) return KeyEventResult.ignored;
+
+    if (event is KeyDownEvent) {
+      _pressedKeys.add(event.logicalKey);
+    } else if (event is KeyUpEvent) {
+      _pressedKeys.remove(event.logicalKey);
+    } else {
+      return KeyEventResult.ignored;
+    }
+
+    int newA = 0, newB = 0, newC = 0, newD = 0;
+    int speed = 100;
+
+    if (_pressedKeys.contains(LogicalKeyboardKey.keyW)) newB = speed;
+    if (_pressedKeys.contains(LogicalKeyboardKey.keyS)) newB = (newB == 0) ? -speed : 0;
+
+    if (_pressedKeys.contains(LogicalKeyboardKey.keyD)) newA = speed;
+    if (_pressedKeys.contains(LogicalKeyboardKey.keyA)) newA = (newA == 0) ? -speed : 0;
+
+    if (_pressedKeys.contains(LogicalKeyboardKey.keyI)) newC = speed;
+    if (_pressedKeys.contains(LogicalKeyboardKey.keyK)) newC = (newC == 0) ? -speed : 0;
+
+    if (_pressedKeys.contains(LogicalKeyboardKey.keyO) || _pressedKeys.contains(LogicalKeyboardKey.keyL)) newD = speed;
+    if (_pressedKeys.contains(LogicalKeyboardKey.keyJ)) newD = (newD == 0) ? -speed : 0;
+
+    if (newA != _a || newB != _b || newC != _c || newD != _d) {
+      _a = newA;
+      _b = newB;
+      _c = newC;
+      _d = newD;
+      _updateRC();
+    }
+
+    return KeyEventResult.handled;
+  }
+ 
+  @override
+  Widget build(BuildContext context) {
+    return Focus(
+      focusNode: _focusNode,
+      autofocus: true,
+      onKeyEvent: _handleKeyEvent,
+      child: Scaffold(
+        body: Stack(
+        children: [
+          Container(
+            width: double.infinity,
+            height: double.infinity,
+            decoration: BoxDecoration(
+              color: Colors.grey[900]
+            ),
+            child: const Center(
+              child: Icon(Icons.videocam_outlined, size: 100, color: Colors.white24),
+            ),
+          ),
+ 
+          SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  _buildTopHUD(),
+                  Expanded(
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        _buildLeftTools(),
+                        _buildRightTelemetry(),
+                      ],
+                    ),
+                  ),
+                  _buildBottomControls(),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    )); // Focus
+  }
+ 
+  Widget _buildTopHUD() {
+    return GlassContainer(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  isConnected ? Icons.wifi : Icons.wifi_off,
+                  color: isConnected ? Colors.greenAccent : Colors.redAccent,
+                ),
+                const SizedBox(width: 10),
+                SizedBox(
+                  width: 130,
+                  child: TextField(
+                    decoration: const InputDecoration(
+                      hintText: 'IP Adresse',
+                      border: InputBorder.none,
+                      isDense: true,
+                    ),
+                    controller: TextEditingController(text: ipAddress),
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ),
+                ElevatedButton(
+                  onPressed: toggleConnection,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: isConnected ? Colors.redAccent.withOpacity(0.8) : Colors.greenAccent.withOpacity(0.8),
+                    foregroundColor: Colors.white,
+                  ),
+                  child: Text(isConnected ? 'Trennen' : 'Verbinden'),
+                ),
+              ],
+            ),
+            const Text(
+              'Drohne 1',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, letterSpacing: 1.5),
+            ),
+            Row(
+              children: [
+                IconButton(
+                  icon: const Icon(Icons.lightbulb),
+                  color: isConnected ? Colors.greenAccent : Colors.grey,
+                  tooltip: 'LED Steuerung',
+                  onPressed: () {},
+                ),
+                const SizedBox(width: 15),
+                const Icon(Icons.battery_charging_full, color: Colors.greenAccent),
+                const SizedBox(width: 5),
+                Text('$batteryLevel%', style: const TextStyle(fontWeight: FontWeight.bold)),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+ 
+  Widget _buildLeftTools() {
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _buildHudButton(
+          icon: isRecording ? Icons.stop_circle : Icons.fiber_manual_record,
+          color: isRecording ? Colors.redAccent : Colors.white,
+          label: 'Flug aufzeichnen',
+          onTap: () => setState(() => isRecording = !isRecording),
+        ),
+        const SizedBox(height: 15),
+        _buildHudButton(
+          icon: Icons.list_alt,
+          label: 'Flugkurse',
+          onTap: _showFlightCoursesDialog,
+        ),
+        const SizedBox(height: 15),
+        _buildHudButton(
+          icon: Icons.person_search,
+          color: aiVisionEnabled ? Colors.blueAccent : Colors.white,
+          label: 'AI Erkennung',
+          onTap: () => setState(() => aiVisionEnabled = !aiVisionEnabled),
+        ),
+        const SizedBox(height: 15),
+        _buildHudButton(
+          icon: Icons.adjust,
+          color: ringModeEnabled ? Colors.purpleAccent : Colors.white,
+          label: 'Ring-Modus',
+          onTap: () => setState(() => ringModeEnabled = !ringModeEnabled),
+        ),
+      ],
+    );
+  }
+ 
+  Widget _buildRightTelemetry() {
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        GlassContainer(
+          width: 150,
+          height: 120,
+          child: Stack(
+            children: [
+              const Center(child: Icon(Icons.map_outlined, color: Colors.white54, size: 40)),
+              Positioned(
+                top: 50,
+                left: 70,
+                child: Container(
+                  width: 10,
+                  height: 10,
+                  decoration: const BoxDecoration(color: Colors.blueAccent, shape: BoxShape.circle),
+                ),
+              )
+            ],
+          ),
+        ),
+        const SizedBox(height: 10),
+        GlassContainer(
+          width: 150,
+          child: Padding(
+            padding: const EdgeInsets.all(12.0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Höhe: $droneHeight', style: const TextStyle(color: Colors.greenAccent)),
+                const SizedBox(height: 5),
+                Text('Speed: $droneSpeed'),
+                const SizedBox(height: 5),
+                Text('Distanz: ---'), // Distance ist in der aktuellen Telemetrie nicht direkt verfügbar
+                const SizedBox(height: 5),
+                Text('Zeit: $droneTime'),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+ 
+  Widget _buildBottomControls() {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        _buildJoystickPlaceholder('Höhe / Drehung'),
+        Column(
+          children: [
+            Row(
+              children: [
+                ElevatedButton.icon(
+                  onPressed: isConnected ? () => _sendCommand('takeoff') : null,
+                  icon: const Icon(Icons.flight_takeoff),
+                  label: const Text('Start'),
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.blueGrey),
+                ),
+                const SizedBox(width: 20),
+                ElevatedButton.icon(
+                  onPressed: isConnected ? () => _sendCommand('land') : null,
+                  icon: const Icon(Icons.flight_land),
+                  label: const Text('Landen'),
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.blueGrey),
+                ),
+              ],
+            ),
+            const SizedBox(height: 15),
+            InkWell(
+              onTap: () => _sendCommand('emergency'),
+              child: Container(
+                width: 150,
+                height: 50,
+                decoration: BoxDecoration(
+                  color: Colors.red,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: Colors.white, width: 2),
+                  boxShadow: [
+                    BoxShadow(color: Colors.redAccent.withOpacity(0.5), blurRadius: 10, spreadRadius: 2)
+                  ],
+                ),
+                child: const Center(
+                  child: Text(
+                    'STOPP',
+                    style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+        _buildJoystickPlaceholder('Bewegung'),
+      ],
+    );
+  }
+ 
+  Widget _buildHudButton({required IconData icon, required String label, required VoidCallback onTap, Color color = Colors.white}) {
+    return InkWell(
+      onTap: onTap,
+      child: GlassContainer(
+        child: Padding(
+          padding: const EdgeInsets.all(8.0),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, color: color),
+              const SizedBox(width: 8),
+              Text(label, style: TextStyle(color: color, fontSize: 12)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+ 
+  Widget _buildJoystickPlaceholder(String label) {
+    return GlassContainer(
+      width: 140,
+      height: 140,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: Colors.white.withOpacity(0.05),
+      ),
+      child: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Icon(Icons.control_camera, size: 40, color: Colors.white54),
+            Text(label, style: const TextStyle(fontSize: 10, color: Colors.white54)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+ 
+class GlassContainer extends StatelessWidget {
+  final Widget child;
+  final double? width;
+  final double? height;
+  final BoxDecoration? decoration;
+ 
+  const GlassContainer({Key? key, required this.child, this.width, this.height, this.decoration}) : super(key: key);
+ 
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(15.0),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 10.0, sigmaY: 10.0),
+        child: Container(
+          width: width,
+          height: height,
+          decoration: decoration ?? BoxDecoration(
+            color: Colors.white.withOpacity(0.1),
+            borderRadius: BorderRadius.circular(15.0),
+            border: Border.all(color: Colors.white.withOpacity(0.2)),
+          ),
+          child: child,
+        ),
+      ),
+    );
   }
 }

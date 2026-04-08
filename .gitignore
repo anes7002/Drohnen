@@ -57,6 +57,7 @@ db.sqlite3
 .packages
 .pub-cache/
 .pub/
+build/
 flutter_*.log
 **/generated_plugin_registrant.dart
 
@@ -118,8 +119,11 @@ flutter_*.log
 **/macos/Flutter/GeneratedPluginRegistrant.swift
 
 # General
+.DS_Store
 .AppleDouble
 .LSOverride
 Thumbs.db
 ehthumbs.db
 Desktop.ini
+Frontend/drohnen_fronted/pubspec.yaml
+Frontend/drohnen_fronted/pubspec.lock

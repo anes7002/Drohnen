@@ -33,17 +33,22 @@ video_cap = None
 @app.post("/connect")
 async def connect(data: dict):
     global control, telemetry
-
+    
     ip = data.get("ip", "192.168.0.104")
+    print(f"[DEBUG] Connect request for IP: {ip}")
 
     success = drone_connection.connect(ip)
+    print(f"[DEBUG] Connect success: {success}")
 
     if success:
         drone_connection.send_command("command")   # WICHTIG
         drone_connection.send_command("streamon")
+        # Set speed to maximum (100) on connection
+        drone_connection.send_command("speed 100")
 
         control = Control(drone_connection)
         telemetry = Telemetry(drone_connection)
+        print("[DEBUG] Control and Telemetry initialized")
 
     return {"success": success}
 
@@ -157,25 +162,63 @@ async def video_stream(websocket: WebSocket):
 
 @app.websocket("/rc")
 async def rc_control(websocket: WebSocket):
-    """WebSocket for real-time RC joystick control."""
+    """WebSocket for real-time RC joystick control and telemetry updates."""
     await websocket.accept()
 
+    # Log connection attempt
+    print(f"[DEBUG] WebSocket /rc requested. drone_connection.connected={drone_connection.connected}")
+
     if not drone_connection.connected or control is None:
+        print("[DEBUG] Closing WebSocket /rc: Drone not connected or control not initialized")
         await websocket.send_json({"error": "Not connected"})
         await websocket.close()
         return
+
+    # Task to send telemetry every second
+    async def send_telemetry():
+        try:
+            while True:
+                if websocket.client_state.value == 1:
+                    if telemetry:
+                        data = telemetry.get_all_telemetry()
+                        await websocket.send_json({"type": "telemetry", "data": data})
+                else:
+                    break
+                await asyncio.sleep(1)
+        except:
+            pass
+
+    # Start telemetry sender as background task
+    tele_task = asyncio.create_task(send_telemetry())
 
     try:
         while True:
             data = await websocket.receive_text()
             msg = json.loads(data)
+            
+            # Check for high-level commands first
+            cmd = msg.get("command")
+            if cmd:
+                if cmd == "takeoff":
+                    control.takeoff()
+                elif cmd == "land":
+                    control.land()
+                elif cmd == "emergency":
+                    control.emergency_stop()
+                continue  # Skip RC values if it's a discrete command
+
+            # Normal RC control
             a = int(msg.get("a", 0))
             b = int(msg.get("b", 0))
             c = int(msg.get("c", 0))
             d = int(msg.get("d", 0))
             control.send_rc(a, b, c, d)
     except WebSocketDisconnect:
+        print("[DEBUG] WebSocket /rc disconnected")
         control.send_rc(0, 0, 0, 0)
+    finally:
+        tele_task.cancel()
+
 
 
 if __name__ == "__main__":
