@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import threading
 import cv2
 import base64
@@ -8,11 +9,29 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
+try:
+    import psycopg2
+    DB_AVAILABLE = True
+except ImportError:
+    DB_AVAILABLE = False
+
 from connection import DroneConnection
 from controls import Control
 from telemetry import Telemetry
 
 app = FastAPI()
+
+
+def get_db_connection():
+    """Return a psycopg2 connection using environment variables or defaults."""
+    return psycopg2.connect(
+        host=os.getenv("DB_HOST", "localhost"),
+        database=os.getenv("DB_NAME", "user"),
+        user=os.getenv("DB_USER", "user"),
+        password=os.getenv("DB_PASSWORD", "password"),
+        port=int(os.getenv("DB_PORT", "5432")),
+    )
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -119,6 +138,133 @@ async def get_telemetry():
         return {"success": True, "data": data}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+# ==========================================
+# Flugkurs CRUD Endpoints
+# ==========================================
+
+@app.get("/flugkurs")
+async def list_flugkurse():
+    """List all saved flight courses from the database."""
+    if not DB_AVAILABLE:
+        return {"success": False, "error": "Datenbank nicht verfügbar (psycopg2 fehlt)"}
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, name, commands, aufgezeichnet_am FROM flugkurs ORDER BY aufgezeichnet_am DESC"
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        courses = [
+            {
+                "id": r[0],
+                "name": r[1],
+                "commands": r[2],
+                "aufgezeichnet_am": str(r[3]),
+            }
+            for r in rows
+        ]
+        return {"success": True, "data": courses}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/flugkurs")
+async def create_flugkurs(data: dict):
+    """Save a new flight course (name + list of timed direction commands)."""
+    if not DB_AVAILABLE:
+        return {"success": False, "error": "Datenbank nicht verfügbar (psycopg2 fehlt)"}
+    name = data.get("name", "").strip()
+    commands = data.get("commands", [])
+    if not name:
+        return {"success": False, "error": "Name darf nicht leer sein"}
+    if not commands:
+        return {"success": False, "error": "Mindestens ein Schritt erforderlich"}
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO flugkurs (name, commands) VALUES (%s, %s) RETURNING id",
+            (name, json.dumps(commands)),
+        )
+        new_id = cur.fetchone()[0]
+        conn.commit()
+        cur.close()
+        conn.close()
+        return {"success": True, "id": new_id}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.delete("/flugkurs/{course_id}")
+async def delete_flugkurs(course_id: int):
+    """Delete a saved flight course by ID."""
+    if not DB_AVAILABLE:
+        return {"success": False, "error": "Datenbank nicht verfügbar (psycopg2 fehlt)"}
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM flugkurs WHERE id = %s", (course_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return {"success": True}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/flugkurs/{course_id}/execute")
+async def execute_flugkurs(course_id: int):
+    """Execute a saved timed flight course via RC control."""
+    if not drone_connection.connected or control is None:
+        return {"success": False, "error": "Not connected"}
+    if not DB_AVAILABLE:
+        return {"success": False, "error": "Datenbank nicht verfügbar (psycopg2 fehlt)"}
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT commands FROM flugkurs WHERE id = %s", (course_id,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+    if not row:
+        return {"success": False, "error": "Flugkurs nicht gefunden"}
+
+    commands = row[0]
+    speed = 50  # RC speed value (0–100)
+
+    # Direction → (left_right, fwd_back, up_down, yaw) mapping
+    _direction_rc = {
+        "forward":      (0,      speed,  0,     0),
+        "backward":     (0,     -speed,  0,     0),
+        "left":         (-speed, 0,      0,     0),
+        "right":        (speed,  0,      0,     0),
+        "up":           (0,      0,      speed, 0),
+        "down":         (0,      0,     -speed, 0),
+        "rotate_left":  (0,      0,      0,    -speed),
+        "rotate_right": (0,      0,      0,     speed),
+    }
+
+    def run_course():
+        for cmd in commands:
+            direction = cmd.get("direction", "")
+            seconds = float(cmd.get("seconds", 1))
+            rc_values = _direction_rc.get(direction)
+            if rc_values:
+                control.send_rc(*rc_values)
+                time.sleep(seconds)
+                control.send_rc(0, 0, 0, 0)
+                time.sleep(0.2)  # Brief pause between steps
+
+    thread = threading.Thread(target=run_course, daemon=True)
+    thread.start()
+    return {"success": True}
 
 
 @app.websocket("/video")
