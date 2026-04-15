@@ -10,11 +10,13 @@ class Control:
 
     def takeoff(self):
         print("[INFO] Taking off...")
-        self.connection.send_command("takeoff")
+        resp = self.connection.send_command_with_response("takeoff")
+        print(f"[DEBUG] Takeoff response: {resp}")
 
     def land(self):
         print("[INFO] Landing...")
-        self.connection.send_command("land")
+        resp = self.connection.send_command_with_response("land")
+        print(f"[DEBUG] Land response: {resp}")
 
     def forward(self, distance=50):
         self.connection.send_command(f"forward {distance}")
