@@ -257,15 +257,19 @@ async def execute_flugkurs(course_id: int):
     }
 
     def run_course():
-        for cmd in commands:
-            direction = cmd.get("direction", "")
-            seconds = float(cmd.get("seconds", 1))
-            rc_values = _direction_rc.get(direction)
-            if rc_values:
-                control.send_rc(*rc_values)
-                time.sleep(seconds)
-                control.send_rc(0, 0, 0, 0)
-                time.sleep(_STEP_PAUSE)
+        try:
+            for cmd in commands:
+                direction = cmd.get("direction", "")
+                seconds = float(cmd.get("seconds", 1))
+                rc_values = _direction_rc.get(direction)
+                if rc_values:
+                    control.send_rc(*rc_values)
+                    time.sleep(seconds)
+                    control.send_rc(0, 0, 0, 0)
+                    time.sleep(_STEP_PAUSE)
+        except Exception as exc:
+            print(f"[ERROR] execute_flugkurs run_course: {exc}")
+            control.send_rc(0, 0, 0, 0)  # Ensure drone stops on error
 
     thread = threading.Thread(target=run_course, daemon=True)
     thread.start()
