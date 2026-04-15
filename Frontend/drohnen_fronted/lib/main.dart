@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
+import 'dart:typed_data';
+
  
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -283,6 +285,8 @@ class DroneDashboard extends StatefulWidget {
 }
  
 class _DroneDashboardState extends State<DroneDashboard> {
+  WebSocketChannel? _videoChannel;
+  Uint8List? _frame;
   bool isConnected = false;
   late String ipAddress;
   bool isRecording = false;
@@ -305,6 +309,16 @@ class _DroneDashboardState extends State<DroneDashboard> {
   void initState() {
     super.initState();
     ipAddress = widget.initialIp;
+
+    _videoChannel = WebSocketChannel.connect(
+      Uri.parse('ws://$backendHost/video'),
+      );
+
+    _videoChannel!.stream.listen((data) {
+     setState(() {
+    _frame = base64Decode(data);
+      } );
+    });
   }
  
   Future<void> toggleConnection() async {
@@ -555,42 +569,64 @@ class _DroneDashboardState extends State<DroneDashboard> {
       onKeyEvent: _handleKeyEvent,
       child: Scaffold(
         body: Stack(
-        children: [
-          Container(
-            width: double.infinity,
-            height: double.infinity,
-            decoration: BoxDecoration(
-              color: Colors.grey[900]
-            ),
-            child: const Center(
-              child: Icon(Icons.videocam_outlined, size: 100, color: Colors.white24),
-            ),
-          ),
- 
-          SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  _buildTopHUD(),
-                  Expanded(
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        _buildLeftTools(),
-                        _buildRightTelemetry(),
-                      ],
+          children: [
+            // 1. EBENE: DER VIDEO-HINTERGRUND (FPV Layer)
+            Container(
+              width: double.infinity,
+              height: double.infinity,
+              decoration: const BoxDecoration(color: Colors.black),
+              child: _frame != null
+                  ? Image.memory(
+                      _frame!,
+                      gaplessPlayback: true, // Verhindert das Flackern beim Frame-Wechsel
+                      fit: BoxFit.cover,     // Füllt den ganzen Bildschirm aus
+                    )
+                  : const Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          CircularProgressIndicator(color: Colors.blueAccent),
+                          SizedBox(height: 15),
+                          Text(
+                            "Warte auf Video-Stream...",
+                            style: TextStyle(color: Colors.white54, fontSize: 16),
+                          ),
+                        ],
+                      ),
                     ),
-                  ),
-                  _buildBottomControls(),
-                ],
+            ),
+
+            // 2. EBENE: DEIN HUD (Interface Layer oben drüber)
+            SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    // Obere HUD-Leiste (Batterie, Signal)
+                    _buildTopHUD(),
+
+                    // Mittlerer Teil (Steuerungs-Symbole/Telemetrie)
+                    Expanded(
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          _buildLeftTools(),
+                          _buildRightTelemetry(),
+                        ],
+                      ),
+                    ),
+
+                    // Untere Steuerung (Buttons)
+                    _buildBottomControls(),
+                  ],
+                ),
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
-    )); // Focus
+    );
   }
  
   Widget _buildTopHUD() {
@@ -682,7 +718,17 @@ class _DroneDashboardState extends State<DroneDashboard> {
           icon: Icons.adjust,
           color: ringModeEnabled ? Colors.purpleAccent : Colors.white,
           label: 'Ring-Modus',
-          onTap: () => setState(() => ringModeEnabled = !ringModeEnabled),
+          onTap: () async {
+          final newState = !aiVisionEnabled;
+
+          setState(() => aiVisionEnabled = newState);
+
+          await http.post(
+            Uri.parse('http://$backendHost/vision/toggle_ai'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({'enabled': newState}),
+          );
+        },
         ),
       ],
     );
