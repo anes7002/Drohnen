@@ -933,12 +933,27 @@ class _FlugkurseDialogState extends State<_FlugkurseDialog> {
         final list = (data['data'] as List)
             .map((e) => SavedFlugkurs.fromJson(e as Map<String, dynamic>))
             .toList();
-        if (mounted) setState(() { _savedCourses = list; _loading = false; });
+        if (mounted) {
+          setState(() {
+            _savedCourses = list;
+            _loading = false;
+          });
+        }
       } else {
-        if (mounted) setState(() { _error = data['error']; _loading = false; });
+        if (mounted) {
+          setState(() {
+            _error = data['error'] as String?;
+            _loading = false;
+          });
+        }
       }
-    } catch (_) {
-      if (mounted) setState(() { _loading = false; });
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _error = 'Verbindungsfehler';
+          _loading = false;
+        });
+      }
     }
   }
 
@@ -946,7 +961,16 @@ class _FlugkurseDialogState extends State<_FlugkurseDialog> {
     try {
       await http.delete(Uri.parse('http://${widget.backendHost}/flugkurs/$id'));
       await _loadCourses();
-    } catch (_) {}
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Fehler beim Löschen des Flugkurses'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
   }
 
   @override
@@ -1094,6 +1118,8 @@ class _AddFlugkursDialog extends StatefulWidget {
 }
 
 class _AddFlugkursDialogState extends State<_AddFlugkursDialog> {
+  static const double _minStepDuration = 0.2; // seconds
+
   final TextEditingController _nameController = TextEditingController();
   final List<FlugStep> _steps = [];
   bool _saving = false;
@@ -1111,11 +1137,12 @@ class _AddFlugkursDialogState extends State<_AddFlugkursDialog> {
     if (_pressStart != null && _activeDirection != null) {
       final seconds =
           DateTime.now().difference(_pressStart!).inMilliseconds / 1000.0;
-      if (seconds >= 0.2) {
+      if (seconds >= _minStepDuration) {
+        final rounded = (seconds * 10).round() / 10.0;
         setState(() {
           _steps.add(FlugStep(
             direction: _activeDirection!,
-            seconds: double.parse(seconds.toStringAsFixed(1)),
+            seconds: rounded,
           ));
         });
       }

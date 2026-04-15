@@ -169,7 +169,8 @@ async def list_flugkurse():
         ]
         return {"success": True, "data": courses}
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        print(f"[ERROR] list_flugkurse: {e}")
+        return {"success": False, "error": "Datenbankfehler beim Laden der Flugkurse"}
 
 
 @app.post("/flugkurs")
@@ -196,7 +197,8 @@ async def create_flugkurs(data: dict):
         conn.close()
         return {"success": True, "id": new_id}
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        print(f"[ERROR] create_flugkurs: {e}")
+        return {"success": False, "error": "Datenbankfehler beim Speichern des Flugkurses"}
 
 
 @app.delete("/flugkurs/{course_id}")
@@ -213,7 +215,8 @@ async def delete_flugkurs(course_id: int):
         conn.close()
         return {"success": True}
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        print(f"[ERROR] delete_flugkurs: {e}")
+        return {"success": False, "error": "Datenbankfehler beim Löschen des Flugkurses"}
 
 
 @app.post("/flugkurs/{course_id}/execute")
@@ -231,13 +234,15 @@ async def execute_flugkurs(course_id: int):
         cur.close()
         conn.close()
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        print(f"[ERROR] execute_flugkurs (db): {e}")
+        return {"success": False, "error": "Datenbankfehler beim Laden des Flugkurses"}
 
     if not row:
         return {"success": False, "error": "Flugkurs nicht gefunden"}
 
     commands = row[0]
     speed = 50  # RC speed value (0–100)
+    _STEP_PAUSE = 0.2  # Seconds pause between steps
 
     # Direction → (left_right, fwd_back, up_down, yaw) mapping
     _direction_rc = {
@@ -260,7 +265,7 @@ async def execute_flugkurs(course_id: int):
                 control.send_rc(*rc_values)
                 time.sleep(seconds)
                 control.send_rc(0, 0, 0, 0)
-                time.sleep(0.2)  # Brief pause between steps
+                time.sleep(_STEP_PAUSE)
 
     thread = threading.Thread(target=run_course, daemon=True)
     thread.start()
