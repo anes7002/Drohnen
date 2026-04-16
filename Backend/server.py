@@ -244,6 +244,7 @@ async def execute_flugkurs(course_id: int):
 
     commands = row[0]
     speed = 50  # RC speed value (0–100)
+    rotation_speed = 100  # Drehen so schnell wie möglich
     _STEP_PAUSE = 0.2  # Seconds pause between steps
 
     # Direction → (left_right, fwd_back, up_down, yaw) mapping
@@ -254,8 +255,8 @@ async def execute_flugkurs(course_id: int):
         "right":        (speed,  0,      0,     0),
         "up":           (0,      0,      speed, 0),
         "down":         (0,      0,     -speed, 0),
-        "rotate_left":  (0,      0,      0,    -speed),
-        "rotate_right": (0,      0,      0,     speed),
+        "rotate_left":  (0,      0,      0,    -rotation_speed),
+        "rotate_right": (0,      0,      0,     rotation_speed),
     }
 
     def run_course():
@@ -313,8 +314,9 @@ async def video_stream(websocket: WebSocket):
         return
 
     try:
+        loop = asyncio.get_running_loop()
         while True:
-            ret, frame = cap.read()
+            ret, frame = await loop.run_in_executor(None, cap.read)
             if not ret:
                 await asyncio.sleep(0.03)
                 continue
@@ -362,6 +364,20 @@ async def rc_control(websocket: WebSocket):
     # Start telemetry sender as background task
     tele_task = asyncio.create_task(send_telemetry())
 
+    last_rc = {"a": 0, "b": 0, "c": 0, "d": 0}
+
+    # Tello benötigt kontinuierliche RC-Updates (ca 20x pro Sekunde) für fließende Bewegungen ohne Ruckeln
+    async def continuous_rc_sender():
+        try:
+            while websocket.client_state.value == 1:
+                if not auto_flight_active:
+                    control.send_rc(last_rc["a"], last_rc["b"], last_rc["c"], last_rc["d"])
+                await asyncio.sleep(0.05)
+        except:
+            pass
+
+    rc_task = asyncio.create_task(continuous_rc_sender())
+
     try:
         while True:
             data = await websocket.receive_text()
@@ -377,19 +393,19 @@ async def rc_control(websocket: WebSocket):
             cmd = msg.get("command")
             if cmd:
                 if cmd == "takeoff":
-                    control.takeoff()
+                    threading.Thread(target=control.takeoff, daemon=True).start()
                 elif cmd == "land":
-                    control.land()
+                    threading.Thread(target=control.land, daemon=True).start()
                 elif cmd == "emergency":
                     control.emergency_stop()
                 continue  # Skip RC values if it's a discrete command
 
             # Normal RC control
-            a = int(msg.get("a", 0))
-            b = int(msg.get("b", 0))
-            c = int(msg.get("c", 0))
-            d = int(msg.get("d", 0))
-            control.send_rc(a, b, c, d)
+            last_rc["a"] = int(msg.get("a", 0))
+            last_rc["b"] = int(msg.get("b", 0))
+            last_rc["c"] = int(msg.get("c", 0))
+            last_rc["d"] = int(msg.get("d", 0))
+            
     except WebSocketDisconnect:
         print("[DEBUG] WebSocket /rc disconnected")
         # Nur anhalten, wenn kein Kurs fliegt
@@ -397,6 +413,7 @@ async def rc_control(websocket: WebSocket):
              control.send_rc(0, 0, 0, 0)
     finally:
         tele_task.cancel()
+        rc_task.cancel()
 
 
 

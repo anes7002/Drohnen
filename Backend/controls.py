@@ -12,6 +12,19 @@ class Control:
         print("[INFO] Taking off...")
         resp = self.connection.send_command_with_response("takeoff")
         print(f"[DEBUG] Takeoff response: {resp}")
+        
+        # Falls die Drohne den Start aus Hardware-/Sicherheitsgründen verweigert
+        if "error" in resp.lower():
+            try:
+                bat = self.connection.send_command_with_response("battery?")
+                temp = self.connection.send_command_with_response("temp?")
+                print(f"[WARNING] Start verweigert! Drohnen-Akku: {bat}%, Temperatur: {temp}°C")
+            except Exception:
+                pass
+        else:
+            # Nach dem Start direkt weiter nach oben fliegen (ca. 80cm höher)
+            print("[INFO] Steige nach Start noch etwas höher...")
+            self.connection.send_command_with_response("up 80")
 
     def land(self):
         print("[INFO] Landing...")

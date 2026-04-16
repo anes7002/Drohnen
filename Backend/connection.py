@@ -73,9 +73,27 @@ class DroneConnection:
     def send_command_with_response(self, command: str) -> str:
         if self.connected and self.socket:
             try:
+                # 1. Vorherigen Buffer leeren (alte liegengelassene Nachrichten ignorieren)
+                self.socket.setblocking(False)
+                try:
+                    while True:
+                        self.socket.recvfrom(1024)
+                except Exception:
+                    pass
+                self.socket.settimeout(self.CONNECTION_TIMEOUT)
+                
+                # 2. Eigentlichen Befehl senden
                 self.socket.sendto(command.encode("utf-8"), (self.ip_address, self.DRONE_PORT))
-                response, _ = self.socket.recvfrom(1024)
-                return response.decode("utf-8").strip()
+                
+                # 3. Auf eine echte Antwort ("ok" oder "error") warten
+                while True:
+                    response, _ = self.socket.recvfrom(1024)
+                    decoded = response.decode("utf-8").strip()
+                    
+                    # Ignoriere fälschlich hier gelandete Telemetrie-Daten (mit Doppelpunkt) 
+                    # oder irrelevante Zahlen
+                    if ":" not in decoded and len(decoded) > 0:
+                        return decoded
             except Exception as e:
                 print(f"[ERROR] Command failed: {e}")
                 return "N/A"

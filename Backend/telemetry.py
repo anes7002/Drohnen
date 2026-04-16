@@ -1,3 +1,5 @@
+import math
+
 class Telemetry:
     def __init__(self, drone):
         self.drone = drone
@@ -15,133 +17,63 @@ class Telemetry:
             return data
         except:
             return {}
+
     def get_height(self):
         try:
-            # Robomaster SDK
-            return self.drone.height.get_height()
-        except Exception:
-            # Tello SDK / DroneConnection
-            if hasattr(self.drone, "send_command_with_response"):
-                res = self.drone.send_command_with_response("height?")
-                # Tello returns something like '15dm' or '0'
-                if isinstance(res, str):
-                    lower_res = res.lower().strip()
-                    # Filter out non-numeric noise like "ok", "error", or attitude strings
-                    if lower_res == "ok" or lower_res == "error" or ";" in res or ":" in res or "~" in res or "s" in lower_res:
-                        return "---"
-                    
-                    import re
-                    match = re.search(r'(-?\d+)', res)
-                    if match:
-                        val = int(match.group(1))
-                        # Tello height command often returns dm, convert to cm
-                        if "dm" in res.lower():
-                            return f"{val * 10} cm"
-                        return f"{val} cm"
-                return "0 cm"
-            return "0 cm"
-        
-    def get_temperature(self):
-        try:
-            return self.drone.temperature.get_temperature()
-        except Exception:
-            if hasattr(self.drone, "send_command_with_response"):
-                res = self.drone.send_command_with_response("temp?")
-                if not isinstance(res, str):
-                    return "0 °C"
-                
-                # Filter out corrupted attitude/battery/height strings
-                lower_res = res.lower().strip()
-                if ";" in res or ":" in res or "dm" in res or lower_res == "ok" or lower_res == "error" or "s" in lower_res:
-                    return "---"
-
-                # Tello returns '85~88C'
-                if "~" in res:
-                    try:
-                        parts = res.replace('C', '').split('~')
-                        avg = (int(parts[0]) + int(parts[1])) // 2
-                        return f"{avg} °C"
-                    except:
-                        pass
-                # Extract any number found
-                import re
-                match = re.search(r'(\d+)', str(res))
-                return f"{match.group(1)} °C" if match else "0 °C"
-            return "0 °C"
-        
-    def get_speed(self):
-        try:
-            # Check if we have live state from the background thread
             if hasattr(self.drone, "last_state") and self.drone.last_state:
-                # Tello state has vgx, vgy, vgz (velocity in x, y, z)
-                # We calculate the vector speed for the ground (horizontal)
-                vx = int(self.drone.last_state.get('vgx', 0))
-                vy = int(self.drone.last_state.get('vgy', 0))
-                # Pythagorean theorem for horizontal speed
-                import math
-                speed = math.sqrt(vx**2 + vy**2)
-                return f"{speed:.1f} cm/s"
-            
-            return self.drone.speed.get_speed()
+                val = self.drone.last_state.get('h', '0')
+                return f"{val} cm"
+            return "---"
         except Exception:
-            if hasattr(self.drone, "send_command_with_response"):
-                # Fallback to the set speed if live velocity fails
-                res = self.drone.send_command_with_response("speed?")
-                if isinstance(res, str):
-                    lower_res = res.lower().strip()
-                    if lower_res == "ok" or lower_res == "error" or ";" in res or ":" in res or "~" in res or "dm" in res or "s" in lower_res:
-                        return "---"
-                    import re
-                    match = re.search(r'(\d+)', res)
-                    if match:
-                        return f"{match.group(1)} (set)"
-                return "0"
-            return "0"
-
-    def get_flight_time(self):
-        try:
-            return self.drone.flight_time.get_flight_time()
-        except Exception:
-            if hasattr(self.drone, "send_command_with_response"):
-                res = self.drone.send_command_with_response("time?")
-                if isinstance(res, str):
-                    lower_res = res.lower().strip()
-                    if lower_res == "ok" or lower_res == "error" or ";" in res or ":" in res or "~" in res or "dm" in res:
-                        return "---"
-                    import re
-                    match = re.search(r'(\d+)', res)
-                    return f"{match.group(1)}s" if match else "0s"
-                return f"{res}s" if res else "0s"
-            return "0s"
-        
-    def get_attitude(self):
-        try:
-            return self.drone.attitude.get_attitude()
-        except Exception:
-            if hasattr(self.drone, "send_command_with_response"):
-                return self.drone.send_command_with_response("attitude?")
-            return "N/A"
-    
+            return "---"
 
     def get_battery(self):
         try:
-            # Robomaster EP/S1
-            return f"{self.drone.battery.get_percentage()}%"
+            if hasattr(self.drone, "last_state") and self.drone.last_state:
+                val = self.drone.last_state.get('bat', '0')
+                return f"{val}%"
+            return "---"
         except Exception:
-            try:
-                # Robomaster TT / Tello SDK
-                if hasattr(self.drone, "send_command_with_response"):
-                    res = self.drone.send_command_with_response("battery?")
-                    if isinstance(res, str):
-                        lower_res = res.lower().strip()
-                        # Filter out corrupted strings or "ok" confirmation
-                        if lower_res == "ok" or lower_res == "error" or ";" in res or ":" in res or "~" in res or "dm" in res or "s" in lower_res:
-                            return "---"
-                        
-                        import re
-                        match = re.search(r'(\d+)', res)
-                        return f"{match.group(1)}%" if match else "---"
-                    return f"{res}%" if res else "---"
-                return "---"
-            except Exception:
-                return "---"
+            return "---"
+
+    def get_temperature(self):
+        try:
+            if hasattr(self.drone, "last_state") and self.drone.last_state:
+                temph = int(self.drone.last_state.get('temph', 0))
+                templ = int(self.drone.last_state.get('templ', 0))
+                return f"{(temph + templ) // 2}°C"
+            return "---"
+        except Exception:
+            return "---"
+
+    def get_speed(self):
+        try:
+            if hasattr(self.drone, "last_state") and self.drone.last_state:
+                vgx = int(self.drone.last_state.get('vgx', 0))
+                vgy = int(self.drone.last_state.get('vgy', 0))
+                vgz = int(self.drone.last_state.get('vgz', 0))
+                speed = math.sqrt(vgx**2 + vgy**2 + vgz**2)
+                return f"{speed:.1f} cm/s"
+            return "---"
+        except Exception:
+            return "---"
+
+    def get_flight_time(self):
+        try:
+            if hasattr(self.drone, "last_state") and self.drone.last_state:
+                time_s = self.drone.last_state.get('time', '0')
+                return f"{time_s}s"
+            return "---"
+        except Exception:
+            return "---"
+
+    def get_attitude(self):
+        try:
+            if hasattr(self.drone, "last_state") and self.drone.last_state:
+                pitch = self.drone.last_state.get('pitch', 0)
+                roll = self.drone.last_state.get('roll', 0)
+                yaw = self.drone.last_state.get('yaw', 0)
+                return {"pitch": float(pitch), "roll": float(roll), "yaw": float(yaw)}
+            return {"pitch": 0.0, "roll": 0.0, "yaw": 0.0}
+        except Exception:
+            return {"pitch": 0.0, "roll": 0.0, "yaw": 0.0}

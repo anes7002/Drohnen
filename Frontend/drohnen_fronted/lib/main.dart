@@ -709,6 +709,7 @@ class _DroneDashboardState extends State<DroneDashboard> {
 
     int newA = 0, newB = 0, newC = 0, newD = 0;
     int speed = 50;
+    int rotationSpeed = 100;
 
     if (_pressedKeys.contains(LogicalKeyboardKey.keyW)) newB = speed;
     if (_pressedKeys.contains(LogicalKeyboardKey.keyS)) newB = (newB == 0) ? -speed : 0;
@@ -719,8 +720,8 @@ class _DroneDashboardState extends State<DroneDashboard> {
     if (_pressedKeys.contains(LogicalKeyboardKey.keyI)) newC = speed;
     if (_pressedKeys.contains(LogicalKeyboardKey.keyK)) newC = (newC == 0) ? -speed : 0;
 
-    if (_pressedKeys.contains(LogicalKeyboardKey.keyO) || _pressedKeys.contains(LogicalKeyboardKey.keyL)) newD = speed;
-    if (_pressedKeys.contains(LogicalKeyboardKey.keyJ)) newD = (newD == 0) ? -speed : 0;
+    if (_pressedKeys.contains(LogicalKeyboardKey.keyO) || _pressedKeys.contains(LogicalKeyboardKey.keyL)) newD = rotationSpeed;
+    if (_pressedKeys.contains(LogicalKeyboardKey.keyJ)) newD = (newD == 0) ? -rotationSpeed : 0;
 
     if (newA != _a || newB != _b || newC != _c || newD != _d) {
       if (isRecording) {
