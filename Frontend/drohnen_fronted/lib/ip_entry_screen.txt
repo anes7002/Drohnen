@@ -1,0 +1,297 @@
+class _IpEntryScreenState extends State<IpEntryScreen> {
+  final TextEditingController _nameController = TextEditingController();
+  final TextEditingController _ipController = TextEditingController(text: '172.20.10.2');
+  final TextEditingController _macController = TextEditingController();
+  List<DroneItem> _droneList = [];
+  DroneItem? _selectedDrone;
+  bool _isLoading = false;
+
+  final String backendHost = '127.0.0.1:8000'; // Same as dashboard 
+  // ODER aus einer config, aber hier in main is es auch hardcoded in Dashboard
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchDrones();
+  }
+
+  Future<void> _fetchDrones() async {
+    setState(() { _isLoading = true; });
+    try {
+      final res = await http.get(Uri.parse('http://$backendHost/drohnen'));
+      final data = jsonDecode(res.body);
+      if (data['success'] == true) {
+        setState(() {
+          _droneList = (data['drohnen'] as List).map((e) => DroneItem.fromJson(e)).toList();
+          // Clear selection if the drone no longer exists
+          if (_selectedDrone != null && !_droneList.any((d) => d.id == _selectedDrone!.id)) {
+            _selectedDrone = null;
+          }
+        });
+      } else {
+        debugPrint('Fetch Error: ${data['error']}');
+      }
+    } catch (e) {
+      debugPrint('HTTP Error: $e');
+    } finally {
+      setState(() { _isLoading = false; });
+    }
+  }
+
+  Future<void> _addDroneToList() async {
+    final name = _nameController.text.trim();
+    final ip = _ipController.text.trim();
+    final mac = _macController.text.trim();
+ 
+    if (name.isNotEmpty && ip.isNotEmpty) {
+      try {
+        final res = await http.post(
+          Uri.parse('http://$backendHost/drohnen'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({
+            'name': name,
+            'ip_adresse': ip,
+            'mac_adresse': mac.isEmpty ? null : mac,
+          }),
+        );
+        final data = jsonDecode(res.body);
+        if (data['success'] == true) {
+           _nameController.clear();
+           _macController.clear();
+           _fetchDrones();
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Fehler: ${data['error']}')));
+        }
+      } catch (e) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Server Fehler: $e')));
+      }
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Bitte Name und IP-Adresse eingeben!'),
+          backgroundColor: Colors.redAccent,
+        ),
+      );
+    }
+  }
+
+  Future<void> _deleteDrone(int id) async {
+      try {
+        final res = await http.delete(Uri.parse('http://$backendHost/drohnen/$id'));
+        final data = jsonDecode(res.body);
+        if (data['success'] == true) {
+           _fetchDrones();
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Fehler: ${data['error']}')));
+        }
+      } catch (e) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Server Fehler: $e')));
+      }
+  }
+ 
+  void _connectToDrone() {
+    if (_selectedDrone == null) return;
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(
+        builder: (context) => DroneDashboard(initialIp: _selectedDrone!.ip),
+      ),
+    );
+  }
+
+  void _showDroneDetails(DroneItem drone) {
+     showDialog(
+       context: context,
+       builder: (ctx) => AlertDialog(
+         title: Text('Drohne: ${drone.name}'),
+         content: Column(
+           mainAxisSize: MainAxisSize.min,
+           crossAxisAlignment: CrossAxisAlignment.start,
+           children: [
+             Text('IP-Adresse: ${drone.ip}'),
+             const SizedBox(height: 8),
+             Text('MAC-Adresse: ${drone.mac ?? "Nicht angegeben"}'),
+             const SizedBox(height: 8),
+             Text('Hinzugefügt am: ${drone.addedAt != null ? DateTime.parse(drone.addedAt!).toLocal().toString().split(".")[0] : "Unbekannt"}'),
+           ],
+         ),
+         actions: [
+           TextButton(
+             onPressed: () {
+                 Navigator.pop(ctx);
+                 _deleteDrone(drone.id);
+             },
+             child: const Text('Löschen', style: TextStyle(color: Colors.red)),
+           ),
+           TextButton(
+             onPressed: () => Navigator.pop(ctx),
+             child: const Text('Schließen'),
+           )
+         ],
+       )
+     );
+  }
+ 
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Colors.black, Colors.grey[900]!, Colors.blueGrey[900]!],
+          ),
+        ),
+        child: Center(
+          child: SingleChildScrollView(
+            child: GlassContainer(
+              width: 750,
+              child: Padding(
+                padding: const EdgeInsets.all(24.0),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Icon(Icons.flight_takeoff, size: 40, color: Colors.blueAccent),
+                    const SizedBox(height: 10),
+                    const Text(
+                      'LAGA-Drohnenmanager',
+                      style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 20),
+                   
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          flex: 1,
+                          child: Column(
+                            children: [
+                              TextField(
+                                controller: _nameController,
+                                decoration: InputDecoration(
+                                  labelText: 'Drohnen-Name',
+                                  prefixIcon: const Icon(Icons.label),
+                                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                                  filled: true, fillColor: Colors.black26, isDense: true,
+                                ),
+                              ),
+                              const SizedBox(height: 15),
+                              TextField(
+                                controller: _ipController,
+                                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                                decoration: InputDecoration(
+                                  labelText: 'IP-Adresse',
+                                  prefixIcon: const Icon(Icons.wifi),
+                                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                                  filled: true, fillColor: Colors.black26, isDense: true,
+                                ),
+                              ),
+                              const SizedBox(height: 15),
+                              TextField(
+                                controller: _macController,
+                                decoration: InputDecoration(
+                                  labelText: 'MAC-Adresse (Optional)',
+                                  prefixIcon: const Icon(Icons.tag),
+                                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                                  filled: true, fillColor: Colors.black26, isDense: true,
+                                ),
+                              ),
+                              const SizedBox(height: 15),
+                              SizedBox(
+                                width: double.infinity,
+                                child: ElevatedButton.icon(
+                                  onPressed: _addDroneToList,
+                                  icon: const Icon(Icons.add),
+                                  label: const Text('ZUR LISTE HINZUFÜGEN'),
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: Colors.blueGrey,
+                                    foregroundColor: Colors.white,
+                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                       
+                        const SizedBox(width: 20),
+                       
+                        Expanded(
+                          flex: 1,
+                          child: Container(
+                            height: 260, // A bit taller to match 3 fields
+                            decoration: BoxDecoration(
+                              color: Colors.black26,
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(color: Colors.white24),
+                            ),
+                            child: _isLoading 
+                                ? const Center(child: CircularProgressIndicator())
+                                : _droneList.isEmpty
+                                ? const Center(
+                                    child: Text('Noch keine Drohnen hinzugefügt.', style: TextStyle(color: Colors.white54)),
+                                  )
+                                : ListView.builder(
+                                    itemCount: _droneList.length,
+                                    itemBuilder: (context, index) {
+                                      final drone = _droneList[index];
+                                      final isSelected = drone.id == _selectedDrone?.id;
+                                      return ListTile(
+                                        leading: Icon(
+                                          Icons.airplanemode_active,
+                                          color: isSelected ? Colors.white : Colors.blueAccent,
+                                        ),
+                                        title: Text(drone.name, style: const TextStyle(fontWeight: FontWeight.bold)),
+                                        subtitle: Text(drone.ip),
+                                        trailing: IconButton(
+                                           icon: const Icon(Icons.more_vert),
+                                           onPressed: () => _showDroneDetails(drone),
+                                        ),
+                                        selected: isSelected,
+                                        selectedTileColor: Colors.blueAccent.withOpacity(0.5),
+                                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                                        onTap: () {
+                                          setState(() {
+                                            _selectedDrone = drone;
+                                          });
+                                        },
+                                      );
+                                    },
+                                  ),
+                          ),
+                        ),
+                      ],
+                    ),
+                   
+                    const SizedBox(height: 25),
+                   
+                    SizedBox(
+                      width: double.infinity,
+                      height: 50,
+                      child: ElevatedButton(
+                        onPressed: _selectedDrone == null ? null : _connectToDrone,
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.blueAccent,
+                          disabledBackgroundColor: Colors.blueAccent.withOpacity(0.3),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                        ),
+                        child: Text(
+                          _selectedDrone == null
+                              ? 'BITTE DROHNE AUSWÄHLEN'
+                              : 'VERBINDEN MIT "${_selectedDrone!.name.toUpperCase()}"',
+                          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}

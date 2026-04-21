@@ -439,3 +439,73 @@ async def rc_control(websocket: WebSocket):
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+@app.get("/drohnen")
+def get_drohnen():
+    if not DB_AVAILABLE:
+        return {"success": False, "error": "Database not available"}
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT id, name, ip_adresse, mac_adresse, erstellt_am FROM drohne ORDER BY erstellt_am DESC")
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        
+        result = []
+        for r in rows:
+            result.append({
+                "id": r[0],
+                "name": r[1],
+                "ip_adresse": r[2],
+                "mac_adresse": r[3],
+                "erstellt_am": r[4].isoformat() if r[4] else None
+            })
+        return {"success": True, "drohnen": result}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@app.post("/drohnen")
+def add_drohne(data: dict):
+    if not DB_AVAILABLE:
+        return {"success": False, "error": "Database not available"}
+    try:
+        name = data.get("name")
+        ip_adresse = data.get("ip_adresse")
+        mac_adresse = data.get("mac_adresse")
+        
+        if not ip_adresse or not name:
+            return {"success": False, "error": "Name and IP are required"}
+            
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO drohne (name, ip_adresse, mac_adresse) 
+               VALUES (%s, %s, %s) RETURNING id, erstellt_am""",
+            (name, ip_adresse, mac_adresse)
+        )
+        row = cur.fetchone()
+        conn.commit()
+        cur.close()
+        conn.close()
+        return {"success": True, "id": row[0], "erstellt_am": row[1].isoformat() if row[1] else None}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@app.delete("/drohnen/{drohnen_id}")
+def delete_drohne(drohnen_id: int):
+    if not DB_AVAILABLE:
+        return {"success": False, "error": "Database not available"}
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM drohne WHERE id = %s RETURNING id", (drohnen_id,))
+        deleted = cur.fetchone()
+        conn.commit()
+        cur.close()
+        conn.close()
+        if deleted:
+            return {"success": True}
+        return {"success": False, "error": "Drohne nicht gefunden"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
