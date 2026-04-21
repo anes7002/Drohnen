@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
+import 'video_stream_view.dart';
  
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -754,16 +755,18 @@ class _DroneDashboardState extends State<DroneDashboard> {
       child: Scaffold(
         body: Stack(
         children: [
-          Container(
-            width: double.infinity,
-            height: double.infinity,
-            decoration: BoxDecoration(
-              color: Colors.grey[900]
-            ),
-            child: const Center(
-              child: Icon(Icons.videocam_outlined, size: 100, color: Colors.white24),
-            ),
-          ),
+          isConnected 
+            ? VideoStreamView(backendUrl: 'ws://$backendHost/video')
+            : Container(
+                width: double.infinity,
+                height: double.infinity,
+                decoration: BoxDecoration(
+                  color: Colors.grey[900]
+                ),
+                child: const Center(
+                  child: Icon(Icons.videocam_outlined, size: 100, color: Colors.white24),
+                ),
+              ),
  
           SafeArea(
             child: Padding(
