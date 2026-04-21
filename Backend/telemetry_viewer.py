@@ -18,10 +18,10 @@ async def view():
                     tele = data.get("data", {})
                     
                     # Get raw values
-                    bat = str(tele.get('battery', '---'))
-                    h = str(tele.get('height', '---'))
-                    t = str(tele.get('temp', '---'))
-                    spd = str(tele.get('speed', '--'))
+                    bat = str(tele.get('battery'))
+                    h = str(tele.get('height'))
+                    t = str(tele.get('temp'))
+                    spd = str(tele.get('speed'))
                     ftime = str(tele.get('flight_time', '--s'))
                     
                     # Log cleanup if data is weird

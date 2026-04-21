@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:ui';
 import 'dart:convert';
 import 'package:flutter/material.dart';
@@ -108,7 +109,7 @@ class IpEntryScreen extends StatefulWidget {
  
 class _IpEntryScreenState extends State<IpEntryScreen> {
   final TextEditingController _nameController = TextEditingController();
-  final TextEditingController _ipController = TextEditingController(text: '192.168.10.1');
+  final TextEditingController _ipController = TextEditingController(text: '172.20.10.2');
  
   // Unsere Liste für die Drohnen
   List<DroneItem> _droneList = [];
@@ -346,10 +347,10 @@ class _DroneDashboardState extends State<DroneDashboard> {
   String droneHeight = '---';
   String droneSpeed = '---';
   String droneTime = '---';
+  String droneTemp = '---';
 
   // RC Control State
   final FocusNode _focusNode = FocusNode();
-  final Set<LogicalKeyboardKey> _pressedKeys = {};
   int _a = 0, _b = 0, _c = 0, _d = 0;
 
   // Recording State
@@ -380,6 +381,7 @@ class _DroneDashboardState extends State<DroneDashboard> {
           droneHeight = '---';
           droneSpeed = '---';
           droneTime = '---';
+          droneTemp = '---';
         });
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -409,6 +411,7 @@ class _DroneDashboardState extends State<DroneDashboard> {
                   droneHeight = tele['height']?.toString() ?? '---';
                   droneSpeed = tele['speed']?.toString() ?? '---';
                   droneTime = tele['flight_time']?.toString() ?? '---';
+                  droneTemp = tele['temp']?.toString() ?? '---';
                 });
               }
             }
@@ -511,8 +514,7 @@ class _DroneDashboardState extends State<DroneDashboard> {
         
         // Pausen einbauen, weil das Backend die Befehle asynchron sendet.
         // Die Drohne braucht Zeit für das Manöver.
-        int delaySeconds = (cmd['command'] == 'takeoff' || cmd['command'] == 'land') ? 5 : 4;
-        await Future.delayed(Duration(seconds: delaySeconds));
+        await Future.delayed(Duration(seconds: 1));
       } catch (e) {
         debugPrint('Fehler bei Flugkurs-Befehl: $e');
       }
@@ -699,29 +701,23 @@ class _DroneDashboardState extends State<DroneDashboard> {
   KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
     if (!isConnected) return KeyEventResult.ignored;
 
-    if (event is KeyDownEvent) {
-      _pressedKeys.add(event.logicalKey);
-    } else if (event is KeyUpEvent) {
-      _pressedKeys.remove(event.logicalKey);
-    } else {
-      return KeyEventResult.ignored;
-    }
+    final keys = HardwareKeyboard.instance.logicalKeysPressed;
 
     int newA = 0, newB = 0, newC = 0, newD = 0;
     int speed = 50;
     int rotationSpeed = 100;
 
-    if (_pressedKeys.contains(LogicalKeyboardKey.keyW)) newB = speed;
-    if (_pressedKeys.contains(LogicalKeyboardKey.keyS)) newB = (newB == 0) ? -speed : 0;
+    if (keys.contains(LogicalKeyboardKey.keyW)) newB = speed;
+    if (keys.contains(LogicalKeyboardKey.keyS)) newB = (newB == 0) ? -speed : 0;
 
-    if (_pressedKeys.contains(LogicalKeyboardKey.keyD)) newA = speed;
-    if (_pressedKeys.contains(LogicalKeyboardKey.keyA)) newA = (newA == 0) ? -speed : 0;
+    if (keys.contains(LogicalKeyboardKey.keyD)) newA = speed;
+    if (keys.contains(LogicalKeyboardKey.keyA)) newA = (newA == 0) ? -speed : 0;
 
-    if (_pressedKeys.contains(LogicalKeyboardKey.keyI)) newC = speed;
-    if (_pressedKeys.contains(LogicalKeyboardKey.keyK)) newC = (newC == 0) ? -speed : 0;
+    if (keys.contains(LogicalKeyboardKey.keyI)) newC = speed;
+    if (keys.contains(LogicalKeyboardKey.keyK)) newC = (newC == 0) ? -speed : 0;
 
-    if (_pressedKeys.contains(LogicalKeyboardKey.keyO) || _pressedKeys.contains(LogicalKeyboardKey.keyL)) newD = rotationSpeed;
-    if (_pressedKeys.contains(LogicalKeyboardKey.keyJ)) newD = (newD == 0) ? -rotationSpeed : 0;
+    if (keys.contains(LogicalKeyboardKey.keyO) || keys.contains(LogicalKeyboardKey.keyL)) newD = rotationSpeed;
+    if (keys.contains(LogicalKeyboardKey.keyJ)) newD = (newD == 0) ? -rotationSpeed : 0;
 
     if (newA != _a || newB != _b || newC != _c || newD != _d) {
       if (isRecording) {
@@ -915,7 +911,7 @@ class _DroneDashboardState extends State<DroneDashboard> {
         ),
         const SizedBox(height: 10),
         GlassContainer(
-          width: 150,
+          width: 150, // Zurück zur normalen Breite
           child: Padding(
             padding: const EdgeInsets.all(12.0),
             child: Column(
@@ -925,9 +921,9 @@ class _DroneDashboardState extends State<DroneDashboard> {
                 const SizedBox(height: 5),
                 Text('Speed: $droneSpeed'),
                 const SizedBox(height: 5),
-                Text('Distanz: ---'), // Distance ist in der aktuellen Telemetrie nicht direkt verfügbar
-                const SizedBox(height: 5),
                 Text('Zeit: $droneTime'),
+                const SizedBox(height: 5),
+                Text('Temp: $droneTemp', style: const TextStyle(color: Colors.orangeAccent)),
               ],
             ),
           ),

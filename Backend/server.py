@@ -18,6 +18,7 @@ except ImportError:
 from connection import DroneConnection
 from controls import Control
 from telemetry import Telemetry
+from status_led import StatusLED
 
 app = FastAPI()
 
@@ -43,6 +44,7 @@ app.add_middleware(
 drone_connection = DroneConnection()
 control = None
 telemetry = None
+status_led = None
 
 auto_flight_active = False
 
@@ -53,10 +55,14 @@ video_cap = None
 
 @app.post("/connect")
 async def connect(data: dict):
-    global control, telemetry
+    global control, telemetry, status_led
     
     ip = data.get("ip", "192.168.0.104")
     print(f"[DEBUG] Connect request for IP: {ip}")
+
+    # Initialisieren des Status-LED Objekts mit der Connection
+    status_led = StatusLED(drone_connection, ip)
+    status_led.connecting()  # Blaues Blinken für "Verbinde..."
 
     success = drone_connection.connect(ip)
     print(f"[DEBUG] Connect success: {success}")
@@ -66,19 +72,26 @@ async def connect(data: dict):
         drone_connection.send_command("streamon")
         # Set speed to half (50) on connection
         drone_connection.send_command("speed 50")
+        
+        # LED Statusanzeige auf grün setzen, um erfolgreiche Verbindung zu signalisieren.
+        status_led.connected() # Grün
 
         control = Control(drone_connection)
         telemetry = Telemetry(drone_connection)
         print("[DEBUG] Control and Telemetry initialized")
+    else:
+        status_led.error() # Rot bei Fehler
 
     return {"success": success}
 
 
 @app.post("/disconnect")
 async def disconnect():
-    global control, telemetry, video_streaming
+    global control, telemetry, video_streaming, status_led
     video_streaming = False
     if drone_connection.connected:
+        if status_led:
+            status_led.off()
         drone_connection.send_command("streamoff")
     drone_connection.disconnect()
     control = None
@@ -243,7 +256,7 @@ async def execute_flugkurs(course_id: int):
         return {"success": False, "error": "Flugkurs nicht gefunden"}
 
     commands = row[0]
-    speed = 50  # RC speed value (0–100)
+    speed = 50  # RC speed value (0–100) - Angepasst auf 50 (gleicher Wert wie bei manueller Steuerung)
     rotation_speed = 100  # Drehen so schnell wie möglich
     _STEP_PAUSE = 0.2  # Seconds pause between steps
 
@@ -277,9 +290,15 @@ async def execute_flugkurs(course_id: int):
                 else:
                     rc_values = _direction_rc.get(direction)
                     if rc_values:
-                        control.send_rc(*rc_values)
-                        time.sleep(seconds)
+                        # Tello benötigt kontinuierliche RC-Befehle, auch im Auto-Modus.
+                        # Daher simulieren wir hier eine Schleife, die den Befehl wiederholt sendet.
+                        end_time = time.time() + seconds
+                        while time.time() < end_time:
+                            control.send_rc(*rc_values)
+                            time.sleep(0.1) # 10Hz RC Update-Rate
+                        
                         control.send_rc(0, 0, 0, 0)
+                        # WICHTIG: Minimale Verzögerung zwischen den Schritten
                         time.sleep(_STEP_PAUSE)
         except Exception as exc:
             print(f"[ERROR] execute_flugkurs run_course: {exc}")
@@ -366,13 +385,14 @@ async def rc_control(websocket: WebSocket):
 
     last_rc = {"a": 0, "b": 0, "c": 0, "d": 0}
 
-    # Tello benötigt kontinuierliche RC-Updates (ca 20x pro Sekunde) für fließende Bewegungen ohne Ruckeln
+    # Tello benötigt rc-Updates für Bewegungen. Zu schnelle Updates (z.B. 20Hz) führen oft zu Pufferlaufzeiten 
+    # und Ruckeln/Lag (Drohne fliegt "hin und her" und hängt nach). 10Hz (0.1s) reicht völlig aus!
     async def continuous_rc_sender():
         try:
             while websocket.client_state.value == 1:
                 if not auto_flight_active:
                     control.send_rc(last_rc["a"], last_rc["b"], last_rc["c"], last_rc["d"])
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.1) # Auf 10 Hz limitiert für eine stabilere Verbindung
         except:
             pass
 
