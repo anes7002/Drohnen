@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:drohnen_fronted/widgets/video_dialog.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
@@ -7,18 +8,19 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../video_stream_view.dart';
 import '../models/flug_step.dart';
-import '../models/saved_flugkurs.dart';
 import '../widgets/glass_container.dart';
+import '../widgets/flugkurse_dialog.dart';
+import '../widgets/add_flugkurs_dialog.dart';
 
 class DroneDashboard extends StatefulWidget {
   final String initialIp;
- 
+
   const DroneDashboard({Key? key, required this.initialIp}) : super(key: key);
- 
+
   @override
   State<DroneDashboard> createState() => _DroneDashboardState();
 }
- 
+
 class _DroneDashboardState extends State<DroneDashboard> {
   bool isConnected = false;
   late String ipAddress;
@@ -26,7 +28,8 @@ class _DroneDashboardState extends State<DroneDashboard> {
   bool aiVisionEnabled = false;
   bool ringModeEnabled = false;
 
-  final String backendHost = '127.0.0.1:8000'; // Bei Android Emulator ggf. auf 10.0.2.2:8000 ändern
+  final String backendHost =
+      '127.0.0.1:8000'; // Bei Android Emulator ggf. auf 10.0.2.2:8000 ändern
   WebSocketChannel? _rcChannel;
   String batteryLevel = '---';
   String droneHeight = '---';
@@ -42,13 +45,13 @@ class _DroneDashboardState extends State<DroneDashboard> {
   List<FlugStep> _recordedSteps = [];
   DateTime? _stepStartTime;
   String? _currentRecordingDirection;
- 
+
   @override
   void initState() {
     super.initState();
     ipAddress = widget.initialIp;
   }
- 
+
   Future<void> toggleConnection() async {
     if (isConnected) {
       // Trennen
@@ -58,7 +61,7 @@ class _DroneDashboardState extends State<DroneDashboard> {
         debugPrint('Error disconnecting: $e');
       }
       _rcChannel?.sink.close();
-      
+
       if (mounted) {
         setState(() {
           isConnected = false;
@@ -85,14 +88,17 @@ class _DroneDashboardState extends State<DroneDashboard> {
         );
         final data = jsonDecode(res.body);
         if (data['success'] == true) {
-          _rcChannel = WebSocketChannel.connect(Uri.parse('ws://$backendHost/rc'));
+          _rcChannel = WebSocketChannel.connect(
+            Uri.parse('ws://$backendHost/rc'),
+          );
           _rcChannel!.stream.listen((message) {
             final msgData = jsonDecode(message);
             if (msgData['type'] == 'telemetry') {
               final tele = msgData['data'];
               if (mounted) {
                 setState(() {
-                  batteryLevel = (tele['battery']?.toString() ?? '---').replaceAll('%', '');
+                  batteryLevel = (tele['battery']?.toString() ?? '---')
+                      .replaceAll('%', '');
                   droneHeight = tele['height']?.toString() ?? '---';
                   droneSpeed = tele['speed']?.toString() ?? '---';
                   droneTime = tele['flight_time']?.toString() ?? '---';
@@ -106,7 +112,10 @@ class _DroneDashboardState extends State<DroneDashboard> {
               isConnected = true;
             });
             ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Verbunden!'), backgroundColor: Colors.green),
+              const SnackBar(
+                content: Text('Verbunden!'),
+                backgroundColor: Colors.green,
+              ),
             );
           }
         } else {
@@ -132,16 +141,25 @@ class _DroneDashboardState extends State<DroneDashboard> {
         if (command == 'takeoff' || command == 'land') {
           // Finish any ongoing RC direction recording
           if (_currentRecordingDirection != null && _stepStartTime != null) {
-            final seconds = DateTime.now().difference(_stepStartTime!).inMilliseconds / 1000.0;
+            final seconds =
+                DateTime.now().difference(_stepStartTime!).inMilliseconds /
+                1000.0;
             if (seconds >= 0.2) {
               final rounded = (seconds * 10).round() / 10.0;
-              _recordedSteps.add(FlugStep(direction: _currentRecordingDirection!, seconds: rounded));
+              _recordedSteps.add(
+                FlugStep(
+                  direction: _currentRecordingDirection!,
+                  seconds: rounded,
+                ),
+              );
             }
           }
           _currentRecordingDirection = null;
           _stepStartTime = null;
-          
-          _recordedSteps.add(FlugStep(direction: command, seconds: 5.0)); // Fake duration
+
+          _recordedSteps.add(
+            FlugStep(direction: command, seconds: 5.0),
+          ); // Fake duration
         }
       }
       _rcChannel!.sink.add(jsonEncode({"command": command}));
@@ -175,28 +193,34 @@ class _DroneDashboardState extends State<DroneDashboard> {
 
   Future<void> _executeCourse(List<Map<String, dynamic>> commands) async {
     Navigator.of(context).pop(); // Dialog schließen
-    
+
     if (!isConnected) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Nicht verbunden!'), backgroundColor: Colors.red),
+        const SnackBar(
+          content: Text('Nicht verbunden!'),
+          backgroundColor: Colors.red,
+        ),
       );
       return;
     }
 
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Flugkurs gestartet...'), backgroundColor: Colors.blue),
+      const SnackBar(
+        content: Text('Flugkurs gestartet...'),
+        backgroundColor: Colors.blue,
+      ),
     );
 
     for (var cmd in commands) {
       if (!isConnected) break; // Abbrechen, falls Verbindung getrennt wird
-      
+
       try {
         await http.post(
           Uri.parse('http://$backendHost/command'),
           headers: {'Content-Type': 'application/json'},
           body: jsonEncode(cmd),
         );
-        
+
         // Pausen einbauen, weil das Backend die Befehle asynchron sendet.
         // Die Drohne braucht Zeit für das Manöver.
         await Future.delayed(const Duration(seconds: 1));
@@ -207,7 +231,10 @@ class _DroneDashboardState extends State<DroneDashboard> {
 
     if (mounted && isConnected) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Flugkurs beendet!'), backgroundColor: Colors.green),
+        const SnackBar(
+          content: Text('Flugkurs beendet!'),
+          backgroundColor: Colors.green,
+        ),
       );
     }
   }
@@ -220,17 +247,25 @@ class _DroneDashboardState extends State<DroneDashboard> {
     if (isRecording) {
       _recordedSteps.clear();
       _currentRecordingDirection = _getDirectionFromRC(_a, _b, _c, _d);
-      _stepStartTime = _currentRecordingDirection != null ? DateTime.now() : null;
+      _stepStartTime = _currentRecordingDirection != null
+          ? DateTime.now()
+          : null;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Aufzeichnung gestartet!'), backgroundColor: Colors.blue),
+        const SnackBar(
+          content: Text('Aufzeichnung gestartet!'),
+          backgroundColor: Colors.blue,
+        ),
       );
     } else {
       // Finish recording the last step if any
       if (_currentRecordingDirection != null && _stepStartTime != null) {
-        final seconds = DateTime.now().difference(_stepStartTime!).inMilliseconds / 1000.0;
+        final seconds =
+            DateTime.now().difference(_stepStartTime!).inMilliseconds / 1000.0;
         if (seconds >= 0.2) {
           final rounded = (seconds * 10).round() / 10.0;
-          _recordedSteps.add(FlugStep(direction: _currentRecordingDirection!, seconds: rounded));
+          _recordedSteps.add(
+            FlugStep(direction: _currentRecordingDirection!, seconds: rounded),
+          );
         }
       }
       _currentRecordingDirection = null;
@@ -240,7 +275,10 @@ class _DroneDashboardState extends State<DroneDashboard> {
         _showSaveCourseDialog();
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Keine Schritte aufgezeichnet.'), backgroundColor: Colors.orange),
+          const SnackBar(
+            content: Text('Keine Schritte aufgezeichnet.'),
+            backgroundColor: Colors.orange,
+          ),
         );
       }
     }
@@ -258,11 +296,17 @@ class _DroneDashboardState extends State<DroneDashboard> {
           builder: (context, setStateDialog) {
             return AlertDialog(
               backgroundColor: Colors.grey[900],
-              title: const Text('Flugkurs speichern', style: TextStyle(color: Colors.white)),
+              title: const Text(
+                'Flugkurs speichern',
+                style: TextStyle(color: Colors.white),
+              ),
               content: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text('${_recordedSteps.length} Schritte aufgezeichnet.', style: const TextStyle(color: Colors.white54)),
+                  Text(
+                    '${_recordedSteps.length} Schritte aufgezeichnet.',
+                    style: const TextStyle(color: Colors.white54),
+                  ),
                   const SizedBox(height: 10),
                   TextField(
                     controller: nameController,
@@ -272,7 +316,9 @@ class _DroneDashboardState extends State<DroneDashboard> {
                       labelStyle: const TextStyle(color: Colors.white54),
                       filled: true,
                       fillColor: Colors.black26,
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
                     ),
                   ),
                 ],
@@ -283,41 +329,56 @@ class _DroneDashboardState extends State<DroneDashboard> {
                     _recordedSteps.clear();
                     Navigator.pop(context);
                   },
-                  child: const Text('Verwerfen', style: TextStyle(color: Colors.redAccent)),
+                  child: const Text(
+                    'Verwerfen',
+                    style: TextStyle(color: Colors.redAccent),
+                  ),
                 ),
                 ElevatedButton(
-                  onPressed: saving ? null : () async {
-                    final name = nameController.text.trim();
-                    if (name.isEmpty) return;
-                    setStateDialog(() => saving = true);
-                    try {
-                      final res = await http.post(
-                        Uri.parse('http://$backendHost/flugkurs'),
-                        headers: {'Content-Type': 'application/json'},
-                        body: jsonEncode({
-                          'name': name,
-                          'commands': _recordedSteps.map((s) => s.toJson()).toList(),
-                        }),
-                      );
-                      final data = jsonDecode(res.body);
-                      if (data['success'] == true) {
-                        Navigator.pop(context);
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Kurs gespeichert!'), backgroundColor: Colors.green),
-                        );
-                        _recordedSteps.clear();
-                      } else {
-                        throw Exception(data['error']);
-                      }
-                    } catch (e) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(content: Text('Fehler: $e'), backgroundColor: Colors.red),
-                      );
-                      setStateDialog(() => saving = false);
-                    }
-                  },
-                  child: saving ? const CircularProgressIndicator() : const Text('Speichern'),
-                )
+                  onPressed: saving
+                      ? null
+                      : () async {
+                          final name = nameController.text.trim();
+                          if (name.isEmpty) return;
+                          setStateDialog(() => saving = true);
+                          try {
+                            final res = await http.post(
+                              Uri.parse('http://$backendHost/flugkurs'),
+                              headers: {'Content-Type': 'application/json'},
+                              body: jsonEncode({
+                                'name': name,
+                                'commands': _recordedSteps
+                                    .map((s) => s.toJson())
+                                    .toList(),
+                              }),
+                            );
+                            final data = jsonDecode(res.body);
+                            if (data['success'] == true) {
+                              Navigator.pop(context);
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('Kurs gespeichert!'),
+                                  backgroundColor: Colors.green,
+                                ),
+                              );
+                              _recordedSteps.clear();
+                            } else {
+                              throw Exception(data['error']);
+                            }
+                          } catch (e) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text('Fehler: $e'),
+                                backgroundColor: Colors.red,
+                              ),
+                            );
+                            setStateDialog(() => saving = false);
+                          }
+                        },
+                  child: saving
+                      ? const CircularProgressIndicator()
+                      : const Text('Speichern'),
+                ),
               ],
             );
           },
@@ -329,7 +390,32 @@ class _DroneDashboardState extends State<DroneDashboard> {
   void _showFlightCoursesDialog() {
     showDialog(
       context: context,
-      builder: (context) => _FlugkurseDialog(
+      builder: (context) => FlugkurseDialog(
+        backendHost: backendHost,
+        isConnected: isConnected,
+        onExecuteBuiltIn: _executeCourse,
+        onExecuteSaved: _executeSavedCourse,
+        onAddNew: _showAddFlugkursDialog,
+      ),
+    );
+  }
+  void _showVideoDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => VideoDialog(
+        backendHost: backendHost,
+        isConnected: isConnected,
+        onExecuteBuiltIn: _executeCourse,
+        onExecuteSaved: _executeSavedCourse,
+        onAddNew: _showAddFlugkursDialog,
+      ),
+    );
+  }
+
+  void _toggleVideoRecording() {
+    showDialog(
+      context: context,
+      builder: (context) => FlugkurseDialog(
         backendHost: backendHost,
         isConnected: isConnected,
         onExecuteBuiltIn: _executeCourse,
@@ -344,13 +430,19 @@ class _DroneDashboardState extends State<DroneDashboard> {
 
     if (!isConnected) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Nicht verbunden!'), backgroundColor: Colors.red),
+        const SnackBar(
+          content: Text('Nicht verbunden!'),
+          backgroundColor: Colors.red,
+        ),
       );
       return;
     }
 
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Flugkurs gestartet...'), backgroundColor: Colors.blue),
+      const SnackBar(
+        content: Text('Flugkurs gestartet...'),
+        backgroundColor: Colors.blue,
+      ),
     );
 
     try {
@@ -362,8 +454,14 @@ class _DroneDashboardState extends State<DroneDashboard> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(data['success'] == true ? 'Flugkurs läuft!' : 'Fehler: ${data['error']}'),
-            backgroundColor: data['success'] == true ? Colors.green : Colors.red,
+            content: Text(
+              data['success'] == true
+                  ? 'Flugkurs läuft!'
+                  : 'Fehler: ${data['error']}',
+            ),
+            backgroundColor: data['success'] == true
+                ? Colors.green
+                : Colors.red,
           ),
         );
       }
@@ -379,7 +477,7 @@ class _DroneDashboardState extends State<DroneDashboard> {
   void _showAddFlugkursDialog() {
     showDialog(
       context: context,
-      builder: (context) => _AddFlugkursDialog(backendHost: backendHost),
+      builder: (context) => AddFlugkursDialog(backendHost: backendHost),
     );
   }
 
@@ -401,18 +499,28 @@ class _DroneDashboardState extends State<DroneDashboard> {
     if (keys.contains(LogicalKeyboardKey.keyI)) newC = speed;
     if (keys.contains(LogicalKeyboardKey.keyK)) newC = (newC == 0) ? -speed : 0;
 
-    if (keys.contains(LogicalKeyboardKey.keyO) || keys.contains(LogicalKeyboardKey.keyL)) newD = rotationSpeed;
-    if (keys.contains(LogicalKeyboardKey.keyJ)) newD = (newD == 0) ? -rotationSpeed : 0;
+    if (keys.contains(LogicalKeyboardKey.keyO) ||
+        keys.contains(LogicalKeyboardKey.keyL))
+      newD = rotationSpeed;
+    if (keys.contains(LogicalKeyboardKey.keyJ))
+      newD = (newD == 0) ? -rotationSpeed : 0;
 
     if (newA != _a || newB != _b || newC != _c || newD != _d) {
       if (isRecording) {
         String? newDirection = _getDirectionFromRC(newA, newB, newC, newD);
         if (_currentRecordingDirection != newDirection) {
           if (_currentRecordingDirection != null && _stepStartTime != null) {
-            final seconds = DateTime.now().difference(_stepStartTime!).inMilliseconds / 1000.0;
+            final seconds =
+                DateTime.now().difference(_stepStartTime!).inMilliseconds /
+                1000.0;
             if (seconds >= 0.2) {
               final rounded = (seconds * 10).round() / 10.0;
-              _recordedSteps.add(FlugStep(direction: _currentRecordingDirection!, seconds: rounded));
+              _recordedSteps.add(
+                FlugStep(
+                  direction: _currentRecordingDirection!,
+                  seconds: rounded,
+                ),
+              );
             }
           }
           _currentRecordingDirection = newDirection;
@@ -429,7 +537,7 @@ class _DroneDashboardState extends State<DroneDashboard> {
 
     return KeyEventResult.handled;
   }
- 
+
   @override
   Widget build(BuildContext context) {
     return Focus(
@@ -438,46 +546,46 @@ class _DroneDashboardState extends State<DroneDashboard> {
       onKeyEvent: _handleKeyEvent,
       child: Scaffold(
         body: Stack(
-        children: [
-          isConnected 
-            ? VideoStreamView(backendUrl: 'ws://$backendHost/video')
-            : Container(
-                width: double.infinity,
-                height: double.infinity,
-                decoration: BoxDecoration(
-                  color: Colors.grey[900]
-                ),
-                child: const Center(
-                  child: Icon(Icons.videocam_outlined, size: 100, color: Colors.white24),
-                ),
-              ),
- 
-          SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  _buildTopHUD(),
-                  Expanded(
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        _buildLeftTools(),
-                        _buildRightTelemetry(),
-                      ],
+          children: [
+            isConnected
+                ? VideoStreamView(backendUrl: 'ws://$backendHost/video')
+                : Container(
+                    width: double.infinity,
+                    height: double.infinity,
+                    decoration: BoxDecoration(color: Colors.grey[900]),
+                    child: const Center(
+                      child: Icon(
+                        Icons.videocam_outlined,
+                        size: 100,
+                        color: Colors.white24,
+                      ),
                     ),
                   ),
-                  _buildBottomControls(),
-                ],
+
+            SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    _buildTopHUD(),
+                    Expanded(
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [_buildLeftTools(), _buildRightTelemetry()],
+                      ),
+                    ),
+                    _buildBottomControls(),
+                  ],
+                ),
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
-    )); // Focus
+    ); // Focus
   }
- 
+
   Widget _buildTopHUD() {
     return GlassContainer(
       child: Padding(
@@ -507,7 +615,9 @@ class _DroneDashboardState extends State<DroneDashboard> {
                 ElevatedButton(
                   onPressed: toggleConnection,
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: isConnected ? Colors.redAccent.withOpacity(0.8) : Colors.greenAccent.withOpacity(0.8),
+                    backgroundColor: isConnected
+                        ? Colors.redAccent.withOpacity(0.8)
+                        : Colors.greenAccent.withOpacity(0.8),
                     foregroundColor: Colors.white,
                   ),
                   child: Text(isConnected ? 'Trennen' : 'Verbinden'),
@@ -516,7 +626,11 @@ class _DroneDashboardState extends State<DroneDashboard> {
             ),
             const Text(
               'Drohne 1',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, letterSpacing: 1.5),
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 1.5,
+              ),
             ),
             Row(
               children: [
@@ -527,9 +641,15 @@ class _DroneDashboardState extends State<DroneDashboard> {
                   onPressed: () {},
                 ),
                 const SizedBox(width: 15),
-                const Icon(Icons.battery_charging_full, color: Colors.greenAccent),
+                const Icon(
+                  Icons.battery_charging_full,
+                  color: Colors.greenAccent,
+                ),
                 const SizedBox(width: 5),
-                Text('$batteryLevel%', style: const TextStyle(fontWeight: FontWeight.bold)),
+                Text(
+                  '$batteryLevel%',
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
               ],
             ),
           ],
@@ -537,7 +657,7 @@ class _DroneDashboardState extends State<DroneDashboard> {
       ),
     );
   }
- 
+
   Widget _buildLeftTools() {
     return Column(
       mainAxisAlignment: MainAxisAlignment.center,
@@ -569,10 +689,17 @@ class _DroneDashboardState extends State<DroneDashboard> {
           label: 'Ring-Modus',
           onTap: () => setState(() => ringModeEnabled = !ringModeEnabled),
         ),
+        const SizedBox(height: 15),
+        _buildHudButton(
+          icon: Icons.adjust,
+          color: Colors.red.shade400,
+          label: 'Video-Aufnahme',
+          onTap:  _showVideoDialog,
+        ),
       ],
     );
   }
- 
+
   Widget _buildRightTelemetry() {
     return Column(
       mainAxisAlignment: MainAxisAlignment.center,
@@ -583,16 +710,25 @@ class _DroneDashboardState extends State<DroneDashboard> {
           height: 120,
           child: Stack(
             children: [
-              const Center(child: Icon(Icons.map_outlined, color: Colors.white54, size: 40)),
+              const Center(
+                child: Icon(
+                  Icons.map_outlined,
+                  color: Colors.white54,
+                  size: 40,
+                ),
+              ),
               Positioned(
                 top: 50,
                 left: 70,
                 child: Container(
                   width: 10,
                   height: 10,
-                  decoration: const BoxDecoration(color: Colors.blueAccent, shape: BoxShape.circle),
+                  decoration: const BoxDecoration(
+                    color: Colors.blueAccent,
+                    shape: BoxShape.circle,
+                  ),
                 ),
-              )
+              ),
             ],
           ),
         ),
@@ -604,13 +740,19 @@ class _DroneDashboardState extends State<DroneDashboard> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('Höhe: $droneHeight', style: const TextStyle(color: Colors.greenAccent)),
+                Text(
+                  'Höhe: $droneHeight',
+                  style: const TextStyle(color: Colors.greenAccent),
+                ),
                 const SizedBox(height: 5),
                 Text('Speed: $droneSpeed'),
                 const SizedBox(height: 5),
                 Text('Zeit: $droneTime'),
                 const SizedBox(height: 5),
-                Text('Temp: $droneTemp', style: const TextStyle(color: Colors.orangeAccent)),
+                Text(
+                  'Temp: $droneTemp',
+                  style: const TextStyle(color: Colors.orangeAccent),
+                ),
               ],
             ),
           ),
@@ -618,7 +760,7 @@ class _DroneDashboardState extends State<DroneDashboard> {
       ],
     );
   }
- 
+
   Widget _buildBottomControls() {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -633,14 +775,18 @@ class _DroneDashboardState extends State<DroneDashboard> {
                   onPressed: isConnected ? () => _sendCommand('takeoff') : null,
                   icon: const Icon(Icons.flight_takeoff),
                   label: const Text('Start'),
-                  style: ElevatedButton.styleFrom(backgroundColor: Colors.blueGrey),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.blueGrey,
+                  ),
                 ),
                 const SizedBox(width: 20),
                 ElevatedButton.icon(
                   onPressed: isConnected ? () => _sendCommand('land') : null,
                   icon: const Icon(Icons.flight_land),
                   label: const Text('Landen'),
-                  style: ElevatedButton.styleFrom(backgroundColor: Colors.blueGrey),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.blueGrey,
+                  ),
                 ),
               ],
             ),
@@ -655,13 +801,21 @@ class _DroneDashboardState extends State<DroneDashboard> {
                   borderRadius: BorderRadius.circular(10),
                   border: Border.all(color: Colors.white, width: 2),
                   boxShadow: [
-                    BoxShadow(color: Colors.redAccent.withOpacity(0.5), blurRadius: 10, spreadRadius: 2)
+                    BoxShadow(
+                      color: Colors.redAccent.withOpacity(0.5),
+                      blurRadius: 10,
+                      spreadRadius: 2,
+                    ),
                   ],
                 ),
                 child: const Center(
                   child: Text(
                     'STOPP',
-                    style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold),
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
                 ),
               ),
@@ -672,8 +826,13 @@ class _DroneDashboardState extends State<DroneDashboard> {
       ],
     );
   }
- 
-  Widget _buildHudButton({required IconData icon, required String label, required VoidCallback onTap, Color color = Colors.white}) {
+
+  Widget _buildHudButton({
+    required IconData icon,
+    required String label,
+    required VoidCallback onTap,
+    Color color = Colors.white,
+  }) {
     return InkWell(
       onTap: onTap,
       child: GlassContainer(
@@ -691,7 +850,7 @@ class _DroneDashboardState extends State<DroneDashboard> {
       ),
     );
   }
- 
+
   Widget _buildJoystickPlaceholder(String label) {
     return GlassContainer(
       width: 140,
@@ -705,502 +864,13 @@ class _DroneDashboardState extends State<DroneDashboard> {
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             const Icon(Icons.control_camera, size: 40, color: Colors.white54),
-            Text(label, style: const TextStyle(fontSize: 10, color: Colors.white54)),
+            Text(
+              label,
+              style: const TextStyle(fontSize: 10, color: Colors.white54),
+            ),
           ],
         ),
       ),
-    );
-  }
-}
-
-// ==========================================
-// Dialog: Flugkurse anzeigen (inkl. gespeicherter)
-// ==========================================
-class _FlugkurseDialog extends StatefulWidget {
-  final String backendHost;
-  final bool isConnected;
-  final Future<void> Function(List<Map<String, dynamic>>) onExecuteBuiltIn;
-  final Future<void> Function(int) onExecuteSaved;
-  final VoidCallback onAddNew;
-
-  const _FlugkurseDialog({
-    required this.backendHost,
-    required this.isConnected,
-    required this.onExecuteBuiltIn,
-    required this.onExecuteSaved,
-    required this.onAddNew,
-  });
-
-  @override
-  State<_FlugkurseDialog> createState() => _FlugkurseDialogState();
-}
-
-class _FlugkurseDialogState extends State<_FlugkurseDialog> {
-  List<SavedFlugkurs> _savedCourses = [];
-  bool _loading = true;
-  String? _error;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadCourses();
-  }
-
-  Future<void> _loadCourses() async {
-    try {
-      final res = await http.get(
-        Uri.parse('http://${widget.backendHost}/flugkurs'),
-      );
-      final data = jsonDecode(res.body);
-      if (data['success'] == true) {
-        final list = (data['data'] as List)
-            .map((e) => SavedFlugkurs.fromJson(e as Map<String, dynamic>))
-            .toList();
-        if (mounted) {
-          setState(() {
-            _savedCourses = list;
-            _loading = false;
-          });
-        }
-      } else {
-        if (mounted) {
-          setState(() {
-            _error = data['error'] as String?;
-            _loading = false;
-          });
-        }
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _error = 'Verbindungsfehler';
-          _loading = false;
-        });
-      }
-    }
-  }
-
-  Future<void> _deleteCourse(int id) async {
-    try {
-      await http.delete(Uri.parse('http://${widget.backendHost}/flugkurs/$id'));
-      await _loadCourses();
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Fehler beim Löschen des Flugkurses'),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      backgroundColor: Colors.grey[900],
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
-      title: const Row(
-        children: [
-          Icon(Icons.route, color: Colors.blueAccent),
-          SizedBox(width: 10),
-          Text('Flugkurse', style: TextStyle(color: Colors.white)),
-        ],
-      ),
-      content: SizedBox(
-        width: 360,
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text('Vordefiniert',
-                  style: TextStyle(color: Colors.white54, fontSize: 12)),
-              const SizedBox(height: 4),
-              ListTile(
-                leading: const Icon(Icons.crop_square, color: Colors.white),
-                title: const Text('Viereck fliegen',
-                    style: TextStyle(color: Colors.white)),
-                subtitle: const Text('Takeoff → 4x Seiten → Land',
-                    style: TextStyle(color: Colors.white54)),
-                onTap: () => widget.onExecuteBuiltIn([
-                  {"command": "takeoff"},
-                  {"command": "forward", "args": {"distance": 50}},
-                  {"command": "right", "args": {"distance": 50}},
-                  {"command": "backward", "args": {"distance": 50}},
-                  {"command": "left", "args": {"distance": 50}},
-                  {"command": "land"},
-                ]),
-              ),
-              const Divider(color: Colors.white24),
-              ListTile(
-                leading: const Icon(Icons.swap_vert, color: Colors.white),
-                title: const Text('Fahrstuhl',
-                    style: TextStyle(color: Colors.white)),
-                subtitle: const Text('Start → Hoch → Runter → Landen',
-                    style: TextStyle(color: Colors.white54)),
-                onTap: () => widget.onExecuteBuiltIn([
-                  {"command": "takeoff"},
-                  {"command": "up", "args": {"distance": 50}},
-                  {"command": "down", "args": {"distance": 50}},
-                  {"command": "land"},
-                ]),
-              ),
-              const Divider(color: Colors.white24),
-              ListTile(
-                leading: const Icon(Icons.rotate_right, color: Colors.white),
-                title: const Text('Pirouette',
-                    style: TextStyle(color: Colors.white)),
-                subtitle: const Text('Dreht sich einmal um 360°',
-                    style: TextStyle(color: Colors.white54)),
-                onTap: () => widget.onExecuteBuiltIn([
-                  {"command": "takeoff"},
-                  {"command": "rotate_right", "args": {"angle": 360}},
-                  {"command": "land"},
-                ]),
-              ),
-              const SizedBox(height: 16),
-              const Divider(color: Colors.white38),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  const Text('Gespeicherte Kurse',
-                      style: TextStyle(color: Colors.white54, fontSize: 12)),
-                  TextButton.icon(
-                    onPressed: () {
-                      Navigator.of(context).pop();
-                      widget.onAddNew();
-                    },
-                    icon: const Icon(Icons.add, size: 18, color: Colors.blueAccent),
-                    label: const Text('Hinzufügen',
-                        style: TextStyle(color: Colors.blueAccent, fontSize: 12)),
-                  ),
-                ],
-              ),
-              if (_loading)
-                const Padding(
-                  padding: EdgeInsets.all(12.0),
-                  child: Center(child: CircularProgressIndicator()),
-                )
-              else if (_error != null)
-                Padding(
-                  padding: const EdgeInsets.all(8.0),
-                  child: Text('Fehler: $_error',
-                      style: const TextStyle(color: Colors.redAccent)),
-                )
-              else if (_savedCourses.isEmpty)
-                const Padding(
-                  padding: EdgeInsets.all(8.0),
-                  child: Text('Keine gespeicherten Kurse.',
-                      style: TextStyle(color: Colors.white54)),
-                )
-              else
-                ..._savedCourses.map((course) => ListTile(
-                      leading: const Icon(Icons.play_circle_outline,
-                          color: Colors.greenAccent),
-                      title: Text(course.name,
-                          style: const TextStyle(color: Colors.white)),
-                      subtitle: Text(
-                          '${course.commands.length} Schritt(e)',
-                          style: const TextStyle(color: Colors.white54)),
-                      trailing: IconButton(
-                        icon: const Icon(Icons.delete_outline,
-                            color: Colors.redAccent),
-                        onPressed: () => _deleteCourse(course.id),
-                      ),
-                      onTap: () => widget.onExecuteSaved(course.id),
-                    )),
-            ],
-          ),
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Schließen',
-              style: TextStyle(color: Colors.redAccent)),
-        ),
-      ],
-    );
-  }
-}
-
-// ==========================================
-// Dialog: Neuen Flugkurs aufzeichnen
-// ==========================================
-class _AddFlugkursDialog extends StatefulWidget {
-  final String backendHost;
-
-  const _AddFlugkursDialog({required this.backendHost});
-
-  @override
-  State<_AddFlugkursDialog> createState() => _AddFlugkursDialogState();
-}
-
-class _AddFlugkursDialogState extends State<_AddFlugkursDialog> {
-  static const double _minStepDuration = 0.2; // seconds
-
-  final TextEditingController _nameController = TextEditingController();
-  final List<FlugStep> _steps = [];
-  bool _saving = false;
-
-  DateTime? _pressStart;
-  String? _activeDirection;
-
-  void _onPressStart(String direction) {
-    _pressStart = DateTime.now();
-    _activeDirection = direction;
-    setState(() {});
-  }
-
-  void _onPressEnd() {
-    if (_pressStart != null && _activeDirection != null) {
-      final seconds =
-          DateTime.now().difference(_pressStart!).inMilliseconds / 1000.0;
-      if (seconds >= _minStepDuration) {
-        final rounded = (seconds * 10).round() / 10.0;
-        setState(() {
-          _steps.add(FlugStep(
-            direction: _activeDirection!,
-            seconds: rounded,
-          ));
-        });
-      }
-    }
-    _pressStart = null;
-    _activeDirection = null;
-    setState(() {});
-  }
-
-  Future<void> _save() async {
-    final name = _nameController.text.trim();
-    if (name.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text('Bitte einen Namen eingeben!'),
-            backgroundColor: Colors.orange),
-      );
-      return;
-    }
-    if (_steps.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text('Mindestens einen Schritt aufzeichnen!'),
-            backgroundColor: Colors.orange),
-      );
-      return;
-    }
-
-    setState(() => _saving = true);
-    try {
-      final res = await http.post(
-        Uri.parse('http://${widget.backendHost}/flugkurs'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'name': name,
-          'commands': _steps.map((s) => s.toJson()).toList(),
-        }),
-      );
-      final data = jsonDecode(res.body);
-      if (mounted) {
-        if (data['success'] == true) {
-          Navigator.of(context).pop();
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-                content: Text('Flugkurs gespeichert!'),
-                backgroundColor: Colors.green),
-          );
-        } else {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-                content: Text('Fehler: ${data['error']}'),
-                backgroundColor: Colors.red),
-          );
-        }
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Fehler: $e'), backgroundColor: Colors.red),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _saving = false);
-    }
-  }
-
-  Widget _dirButton(String direction, IconData icon, String label) {
-    final isActive = _activeDirection == direction;
-    return GestureDetector(
-      onTapDown: (_) => _onPressStart(direction),
-      onTapUp: (_) => _onPressEnd(),
-      onTapCancel: () => _onPressEnd(),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 100),
-        width: 72,
-        height: 72,
-        decoration: BoxDecoration(
-          color: isActive
-              ? Colors.blueAccent.withOpacity(0.8)
-              : Colors.white.withOpacity(0.1),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: isActive ? Colors.blueAccent : Colors.white24,
-            width: isActive ? 2 : 1,
-          ),
-        ),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(icon,
-                color: isActive ? Colors.white : Colors.white70, size: 28),
-            const SizedBox(height: 2),
-            Text(label,
-                style: TextStyle(
-                    fontSize: 10,
-                    color: isActive ? Colors.white : Colors.white54)),
-          ],
-        ),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      backgroundColor: Colors.grey[900],
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
-      title: const Row(
-        children: [
-          Icon(Icons.fiber_manual_record, color: Colors.redAccent),
-          SizedBox(width: 10),
-          Text('Flugkurs aufzeichnen',
-              style: TextStyle(color: Colors.white)),
-        ],
-      ),
-      content: SizedBox(
-        width: 380,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: _nameController,
-              style: const TextStyle(color: Colors.white),
-              decoration: InputDecoration(
-                labelText: 'Name des Flugkurses',
-                labelStyle: const TextStyle(color: Colors.white54),
-                border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(10)),
-                filled: true,
-                fillColor: Colors.black26,
-                isDense: true,
-              ),
-            ),
-            const SizedBox(height: 16),
-            const Text(
-              'Taste gedrückt halten = Richtung aufnehmen',
-              style: TextStyle(color: Colors.white54, fontSize: 12),
-            ),
-            const SizedBox(height: 12),
-            // Direction buttons – 3×3 grid (empty center)
-            Column(
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    _dirButton('rotate_left', Icons.rotate_left, 'Links\ndrehen'),
-                    const SizedBox(width: 8),
-                    _dirButton('forward', Icons.arrow_upward, 'Vor'),
-                    const SizedBox(width: 8),
-                    _dirButton('rotate_right', Icons.rotate_right, 'Rechts\ndrehen'),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    _dirButton('left', Icons.arrow_back, 'Links'),
-                    const SizedBox(width: 8),
-                    _dirButton('up', Icons.arrow_upward_rounded, 'Hoch'),
-                    const SizedBox(width: 8),
-                    _dirButton('right', Icons.arrow_forward, 'Rechts'),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    const SizedBox(width: 80),
-                    _dirButton('backward', Icons.arrow_downward, 'Zurück'),
-                    const SizedBox(width: 8),
-                    _dirButton('down', Icons.arrow_downward_rounded, 'Runter'),
-                  ],
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            Container(
-              height: 140,
-              decoration: BoxDecoration(
-                color: Colors.black26,
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: Colors.white24),
-              ),
-              child: _steps.isEmpty
-                  ? const Center(
-                      child: Text('Noch keine Schritte aufgezeichnet.',
-                          style: TextStyle(color: Colors.white38)))
-                  : ListView.builder(
-                      itemCount: _steps.length,
-                      itemBuilder: (context, index) => ListTile(
-                        dense: true,
-                        leading: Text('${index + 1}.',
-                            style: const TextStyle(color: Colors.white54)),
-                        title: Text(_steps[index].label,
-                            style: const TextStyle(
-                                color: Colors.white, fontSize: 13)),
-                        trailing: IconButton(
-                          icon: const Icon(Icons.close,
-                              color: Colors.redAccent, size: 18),
-                          onPressed: () =>
-                              setState(() => _steps.removeAt(index)),
-                        ),
-                      ),
-                    ),
-            ),
-            if (_steps.isNotEmpty)
-              Align(
-                alignment: Alignment.centerRight,
-                child: TextButton(
-                  onPressed: () => setState(() => _steps.clear()),
-                  child: const Text('Alle löschen',
-                      style: TextStyle(color: Colors.redAccent, fontSize: 12)),
-                ),
-              ),
-          ],
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Abbrechen',
-              style: TextStyle(color: Colors.white54)),
-        ),
-        ElevatedButton.icon(
-          onPressed: _saving ? null : _save,
-          icon: _saving
-              ? const SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(strokeWidth: 2))
-              : const Icon(Icons.save),
-          label: const Text('Speichern'),
-          style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.blueAccent,
-              foregroundColor: Colors.white),
-        ),
-      ],
     );
   }
 }
