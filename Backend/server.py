@@ -366,7 +366,7 @@ async def rc_control(websocket: WebSocket):
         await websocket.close()
         return
 
-    # Task to send telemetry every second
+    # Task to send telemetry at 10 Hz for accurate position tracking
     async def send_telemetry():
         try:
             while True:
@@ -376,7 +376,7 @@ async def rc_control(websocket: WebSocket):
                         await websocket.send_json({"type": "telemetry", "data": data})
                 else:
                     break
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.1)
         except:
             pass
 

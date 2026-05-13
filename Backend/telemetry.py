@@ -12,7 +12,8 @@ class Telemetry:
                 "temp": self.get_temperature(),
                 "speed": self.get_speed(),
                 "flight_time": self.get_flight_time(),
-                "attitude": self.get_attitude()
+                "attitude": self.get_attitude(),
+                "velocity": self.get_velocity()
             }
             return data
         except:
@@ -77,3 +78,15 @@ class Telemetry:
             return {"pitch": 0.0, "roll": 0.0, "yaw": 0.0}
         except Exception:
             return {"pitch": 0.0, "roll": 0.0, "yaw": 0.0}
+
+    def get_velocity(self):
+        try:
+            if hasattr(self.drone, "last_state") and self.drone.last_state:
+                vgx = int(self.drone.last_state.get('vgx', 0))
+                vgy = int(self.drone.last_state.get('vgy', 0))
+                vgz = int(self.drone.last_state.get('vgz', 0))
+                return {"vgx": float(vgx), "vgy": float(vgy), "vgz": float(vgz)}
+            return {"vgx": 0.0, "vgy": 0.0, "vgz": 0.0}
+        except Exception:
+            return {"vgx": 0.0, "vgy": 0.0, "vgz": 0.0}
+
