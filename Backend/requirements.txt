@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+opencv-python
+psycopg2
+websockets
+pynput
+robomaster
