@@ -165,8 +165,8 @@ async def set_led(data: dict):
     freq = float(data.get("freq", 1.0))
 
     if blink:
-        # Zwischen Farbe und Aus blinken: ext led r1 g1 b1 r2 g2 b2 freq
-        drone_connection.send_command(f"ext led {r} {g} {b} 0 0 0 {freq}")
+        # Tello EDU SDK: ext led bl <freq> <r1> <g1> <b1> <r2> <g2> <b2>
+        drone_connection.send_command(f"ext led bl {freq} {r} {g} {b} 0 0 0")
     else:
         drone_connection.send_command(f"ext led {r} {g} {b}")
 

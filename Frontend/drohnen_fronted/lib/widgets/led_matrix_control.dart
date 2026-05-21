@@ -29,26 +29,37 @@ class _LedMatrixControlState extends State<LedMatrixControl> {
     setState(() => _pixelPattern = List.generate(64, (_) => false));
   }
 
-  Future<void> _applyLed() async {
+  Future<void> _applyLed({bool? isOn}) async {
+    final on = isOn ?? _isOn;
     setState(() => _isSending = true);
     try {
       final r = (_selectedColor.r * 255.0).round().clamp(0, 255);
       final g = (_selectedColor.g * 255.0).round().clamp(0, 255);
       final b = (_selectedColor.b * 255.0).round().clamp(0, 255);
 
-      await http.post(
+      final response = await http.post(
         Uri.parse('http://${widget.backendHost}/led'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
-          'r': _isOn ? r : 0,
-          'g': _isOn ? g : 0,
-          'b': _isOn ? b : 0,
+          'r': on ? r : 0,
+          'g': on ? g : 0,
+          'b': on ? b : 0,
           'blink': _isBlinking,
           'freq': 1.0,
         }),
       );
+      final body = jsonDecode(response.body) as Map<String, dynamic>;
+      if (mounted && body['success'] != true) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('LED Fehler: ${body['error'] ?? 'Unbekannt'}')),
+        );
+      }
     } catch (e) {
-      debugPrint('LED Fehler: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Verbindungsfehler: $e')),
+        );
+      }
     } finally {
       if (mounted) setState(() => _isSending = false);
     }
@@ -98,7 +109,10 @@ class _LedMatrixControlState extends State<LedMatrixControl> {
             const Text('An', style: TextStyle(color: Colors.white54)),
             Switch(
               value: _isOn,
-              onChanged: (val) => setState(() => _isOn = val),
+              onChanged: (val) {
+                setState(() => _isOn = val);
+                _applyLed(isOn: val);
+              },
               activeThumbColor: Colors.greenAccent,
             ),
           ],
