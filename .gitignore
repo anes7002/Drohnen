@@ -30,6 +30,7 @@ htmlcov/
 __pycache__/
 instance/
 .webassets-cache
+Backend/recordings
 
 # Flask/Django specific
 *.db

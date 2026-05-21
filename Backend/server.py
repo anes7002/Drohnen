@@ -7,21 +7,11 @@ import os
 import threading
 import time
 from contextlib import contextmanager
+from datetime import datetime
 
 import cv2
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-
 from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
-import os
-from datetime import datetime
-
-RECORDINGS_DIR = "recordings"
-os.makedirs(RECORDINGS_DIR, exist_ok=True) 
-
-is_recording = False
-video_writer = None
-current_recording_filename = None
 
 try:
     import psycopg2
@@ -87,6 +77,18 @@ auto_flight_active = False
 
 
 # ---------------------------------------------------------------------------
+# Video-Aufnahme-Zustand
+# ---------------------------------------------------------------------------
+
+RECORDINGS_DIR = "recordings"
+os.makedirs(RECORDINGS_DIR, exist_ok=True)
+
+is_recording = False
+video_writer: cv2.VideoWriter | None = None
+current_recording_filename: str | None = None
+
+
+# ---------------------------------------------------------------------------
 # Flugkurs-Konstanten
 # ---------------------------------------------------------------------------
 
@@ -132,146 +134,6 @@ async def connect(data: dict):
 
     return {"success": success}
 
-@app.post("/recordings/start")
-async def start_recording():
-    global is_recording
-    if not drone_connection.connected:
-        return {"success": False, "error": "Drohne nicht verbunden"}
-    
-    is_recording = True
-    return {"success": True, "message": "Aufnahme gestartet"}
-
-@app.post("/recordings/stop")
-async def stop_recording():
-    global is_recording, video_writer, current_recording_filename
-    is_recording = False
-    
-    # Kurz warten, damit der Loop den VideoWriter sauber schließen kann
-    await asyncio.sleep(0.5)
-    
-    # Optional: In die Datenbank speichern, falls konfiguriert
-    if DB_AVAILABLE and current_recording_filename:
-        try:
-            conn = get_db_connection()
-            cur = conn.cursor()
-            cur.execute(
-                "INSERT INTO recordings (filename, created_at) VALUES (%s, %s)",
-                (current_recording_filename, datetime.now())
-            )
-            conn.commit()
-            cur.close()
-            conn.close()
-        except Exception as e:
-            print(f"[ERROR] DB Speichern fehlgeschlagen: {e}")
-
-    current_recording_filename = None
-    return {"success": True, "message": "Aufnahme gestoppt"}
-
-@app.get("/recordings")
-async def get_recordings():
-    if not DB_AVAILABLE:
-        # Fallback auf Dateisystem, wenn keine DB existiert
-        files = [f for f in os.listdir(RECORDINGS_DIR) if f.endswith('.mp4')]
-        data = [{"id": i, "filename": f, "created_at": None} for i, f in enumerate(files)]
-        return {"success": True, "data": data}
-
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        # Tabelle 'recordings' (id, filename, created_at) muss in der DB existieren!
-        cur.execute("SELECT id, filename, created_at FROM recordings ORDER BY created_at DESC")
-        rows = cur.fetchall()
-        cur.close()
-        conn.close()
-        
-        data = [{"id": r[0], "filename": r[1], "created_at": str(r[2])} for r in rows]
-        return {"success": True, "data": data}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-@app.delete("/recordings/{rec_id}")
-async def delete_recording(rec_id: int):
-    # Logik zum Löschen aus DB & Dateisystem
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT filename FROM recordings WHERE id = %s", (rec_id,))
-        row = cur.fetchone()
-        
-        if row:
-            filepath = os.path.join(RECORDINGS_DIR, row[0])
-            if os.path.exists(filepath):
-                os.remove(filepath)
-            
-            cur.execute("DELETE FROM recordings WHERE id = %s", (rec_id,))
-            conn.commit()
-            
-        cur.close()
-        conn.close()
-        return {"success": True}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-
-
-@app.websocket("/video")
-async def video_stream(websocket: WebSocket):
-    global is_recording, video_writer, current_recording_filename
-    
-    await websocket.accept()
-
-    if not drone_connection.connected:
-        await websocket.send_json({"error": "Not connected"})
-        await websocket.close()
-        return
-
-    cap = cv2.VideoCapture(f"udp://@0.0.0.0:11111", cv2.CAP_FFMPEG)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-
-    if not cap.isOpened():
-        await websocket.send_json({"error": "Could not open video stream"})
-        await websocket.close()
-        return
-
-    try:
-        loop = asyncio.get_running_loop()
-        while True:
-            ret, frame = await loop.run_in_executor(None, cap.read)
-            if not ret:
-                await asyncio.sleep(0.03)
-                continue
-
-            if is_recording:
-                if video_writer is None:
-                    # Initialisiere den VideoWriter beim ersten Frame
-                    h, w, _ = frame.shape
-                    fourcc = cv2.VideoWriter_fourcc(*'mp4v') # Codec für MP4
-                    current_recording_filename = f"drohne_aufnahme_{int(time.time())}.mp4"
-                    filepath = os.path.join(RECORDINGS_DIR, current_recording_filename)
-                    video_writer = cv2.VideoWriter(filepath, fourcc, 30.0, (w, h))
-                
-                # Frame in die Datei schreiben
-                video_writer.write(frame)
-            else:
-                if video_writer is not None:
-                    # Aufnahme wurde gestoppt, Datei sauber schließen
-                    video_writer.release()
-                    video_writer = None
-
-            # Encode frame as JPEG for Livestream
-            _, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
-            jpg_b64 = base64.b64encode(buffer).decode("utf-8")
-
-            await websocket.send_text(jpg_b64)
-            await asyncio.sleep(0.03)  
-    except WebSocketDisconnect:
-        pass
-    finally:
-        if video_writer is not None:
-            video_writer.release()
-            video_writer = None
-            is_recording = False
-        cap.release()
 
 @app.post("/disconnect")
 async def disconnect():
@@ -285,6 +147,29 @@ async def disconnect():
     drone_connection.disconnect()
     control = None
     telemetry = None
+    return {"success": True}
+
+
+# ---------------------------------------------------------------------------
+# LED-Steuerung
+# ---------------------------------------------------------------------------
+
+@app.post("/led")
+async def set_led(data: dict):
+    if not drone_connection.connected:
+        return {"success": False, "error": "Nicht verbunden"}
+    r = max(0, min(255, int(data.get("r", 0))))
+    g = max(0, min(255, int(data.get("g", 0))))
+    b = max(0, min(255, int(data.get("b", 0))))
+    blink = data.get("blink", False)
+    freq = float(data.get("freq", 1.0))
+
+    if blink:
+        # Zwischen Farbe und Aus blinken: ext led r1 g1 b1 r2 g2 b2 freq
+        drone_connection.send_command(f"ext led {r} {g} {b} 0 0 0 {freq}")
+    else:
+        drone_connection.send_command(f"ext led {r} {g} {b}")
+
     return {"success": True}
 
 
@@ -547,12 +432,88 @@ async def execute_flugkurs(course_id: int):
 
 
 # ---------------------------------------------------------------------------
-# WebSocket: Video-Stream
+# Video-Aufnahme-Endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/recordings/start")
+async def start_recording():
+    global is_recording
+    if not drone_connection.connected:
+        return {"success": False, "error": "Drohne nicht verbunden"}
+    is_recording = True
+    return {"success": True, "message": "Aufnahme gestartet"}
+
+
+@app.post("/recordings/stop")
+async def stop_recording():
+    global is_recording, video_writer, current_recording_filename
+    is_recording = False
+
+    # Kurz warten, damit der Video-Loop den Writer sauber schließen kann
+    await asyncio.sleep(0.5)
+
+    if DB_AVAILABLE and current_recording_filename:
+        try:
+            with db_cursor() as cur:
+                cur.execute(
+                    "INSERT INTO recordings (filename, created_at) VALUES (%s, %s)",
+                    (current_recording_filename, datetime.now()),
+                )
+        except Exception as e:
+            print(f"[ERROR] Aufnahme in DB speichern fehlgeschlagen: {e}")
+
+    current_recording_filename = None
+    return {"success": True, "message": "Aufnahme gestoppt"}
+
+
+@app.get("/recordings")
+async def get_recordings():
+    if not DB_AVAILABLE:
+        files = [f for f in os.listdir(RECORDINGS_DIR) if f.endswith(".mp4")]
+        data = [{"id": i, "filename": f, "created_at": None} for i, f in enumerate(files)]
+        return {"success": True, "data": data}
+    try:
+        with db_cursor() as cur:
+            cur.execute(
+                "SELECT id, filename, created_at FROM recordings ORDER BY created_at DESC"
+            )
+            rows = cur.fetchall()
+        data = [{"id": r[0], "filename": r[1], "created_at": str(r[2])} for r in rows]
+        return {"success": True, "data": data}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.delete("/recordings/{rec_id}")
+async def delete_recording(rec_id: int):
+    try:
+        with db_cursor() as cur:
+            cur.execute("SELECT filename FROM recordings WHERE id = %s", (rec_id,))
+            row = cur.fetchone()
+            if row:
+                filepath = os.path.join(RECORDINGS_DIR, row[0])
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                cur.execute("DELETE FROM recordings WHERE id = %s", (rec_id,))
+        return {"success": True}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# WebSocket: Video-Stream (mit Aufnahme & AI-Erkennung)
 # ---------------------------------------------------------------------------
 
 @app.websocket("/video")
 async def video_stream(websocket: WebSocket):
-    """Streamt Drohnen-Videoframes als Base64-JPEG über WebSocket."""
+    """
+    Streamt Drohnen-Videoframes als Base64-JPEG über WebSocket.
+    Unterstützt gleichzeitig:
+      - Video-Aufnahme als MP4 (gesteuert via /recordings/start + /stop)
+      - AI-Erkennung (gesteuert via /detection/toggle)
+    """
+    global video_writer, current_recording_filename, is_recording
+
     await websocket.accept()
 
     if not drone_connection.connected:
@@ -578,6 +539,20 @@ async def video_stream(websocket: WebSocket):
                 await asyncio.sleep(0.03)
                 continue
 
+            # --- Aufnahme ---
+            if is_recording:
+                if video_writer is None:
+                    h, w = frame.shape[:2]
+                    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                    current_recording_filename = f"drohne_{int(time.time())}.mp4"
+                    filepath = os.path.join(RECORDINGS_DIR, current_recording_filename)
+                    video_writer = cv2.VideoWriter(filepath, fourcc, 30.0, (w, h))
+                video_writer.write(frame)
+            elif video_writer is not None:
+                video_writer.release()
+                video_writer = None
+
+            # --- AI-Erkennung ---
             if detection.enabled:
                 detection.frame_count += 1
                 if detection.frame_count % detection.DETECT_EVERY_N == 0:
@@ -586,12 +561,18 @@ async def video_stream(websocket: WebSocket):
                     )
                 detection.draw(frame, detection.boxes)
 
+            # --- Frame senden ---
             _, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
             await websocket.send_text(base64.b64encode(buffer).decode("utf-8"))
             await asyncio.sleep(0.03)  # ~30 fps
+
     except WebSocketDisconnect:
         pass
     finally:
+        if video_writer is not None:
+            video_writer.release()
+            video_writer = None
+            is_recording = False
         cap.release()
 
 
@@ -676,5 +657,3 @@ async def rc_control(websocket: WebSocket):
     finally:
         tele_task.cancel()
         rc_task.cancel()
-
-

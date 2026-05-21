@@ -718,7 +718,7 @@ class _DroneDashboardState extends State<DroneDashboard> {
         backgroundColor: Colors.transparent,
         child: SizedBox(
           width: 350,
-          child: LedMatrixControl(),
+          child: LedMatrixControl(backendHost: backendHost),
         ),
       ),
     );
