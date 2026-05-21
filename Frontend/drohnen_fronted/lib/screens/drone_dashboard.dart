@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
+import '../widgets/led_matrix_control.dart'; // Pfad ggf. anpassen
 
 import '../video_stream_view.dart';
 import '../models/flug_step.dart';
@@ -635,11 +636,22 @@ class _DroneDashboardState extends State<DroneDashboard> {
             Row(
               children: [
                 IconButton(
-                  icon: const Icon(Icons.lightbulb),
-                  color: isConnected ? Colors.greenAccent : Colors.grey,
-                  tooltip: 'LED Steuerung',
-                  onPressed: () {},
-                ),
+  icon: const Icon(Icons.lightbulb),
+  color: isConnected ? Colors.greenAccent : Colors.grey,
+  tooltip: 'LED Steuerung',
+  onPressed: () {
+    showDialog(
+      context: context,
+      builder: (context) => Dialog(
+        backgroundColor: Colors.transparent,
+        child: SizedBox(
+          width: 350,
+          child: LedMatrixControl(),
+        ),
+      ),
+    );
+  },
+),
                 const SizedBox(width: 15),
                 const Icon(
                   Icons.battery_charging_full,
