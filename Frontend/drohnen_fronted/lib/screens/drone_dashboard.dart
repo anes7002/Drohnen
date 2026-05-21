@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 import 'package:drohnen_fronted/widgets/video_dialog.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -28,6 +29,13 @@ class _DroneDashboardState extends State<DroneDashboard> {
   bool isRecording = false;
   bool aiVisionEnabled = false;
   bool ringModeEnabled = false;
+
+  // 2D Map State
+  final List<Offset> _dronePath = [Offset.zero];
+  double _currentDroneX = 0;
+  double _currentDroneY = 0;
+  double _droneYaw = 0;
+  DateTime? _lastTelemetryTime;
 
   final String backendHost =
       '127.0.0.1:8000'; // Bei Android Emulator ggf. auf 10.0.2.2:8000 ändern
@@ -71,6 +79,13 @@ class _DroneDashboardState extends State<DroneDashboard> {
           droneSpeed = '---';
           droneTime = '---';
           droneTemp = '---';
+          
+          _dronePath.clear();
+          _dronePath.add(Offset.zero);
+          _currentDroneX = 0;
+          _currentDroneY = 0;
+          _droneYaw = 0;
+          _lastTelemetryTime = null;
         });
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -104,6 +119,37 @@ class _DroneDashboardState extends State<DroneDashboard> {
                   droneSpeed = tele['speed']?.toString() ?? '---';
                   droneTime = tele['flight_time']?.toString() ?? '---';
                   droneTemp = tele['temp']?.toString() ?? '---';
+
+                  if (tele['attitude'] != null) {
+                    _droneYaw = (tele['attitude']['yaw'] ?? 0).toDouble();
+                  }
+
+                  if (tele['velocity'] != null) {
+                    double vgx = -(tele['velocity']['vgx'] ?? 0).toDouble();
+                    double vgy = -(tele['velocity']['vgy'] ?? 0).toDouble();
+
+                    // Compute actual elapsed time for accurate dead-reckoning.
+                    // Cap at 0.5s to avoid huge jumps after pauses.
+                    final now = DateTime.now();
+                    final dt = _lastTelemetryTime != null
+                        ? (now.difference(_lastTelemetryTime!).inMilliseconds / 1000.0).clamp(0.0, 0.5)
+                        : 0.1;
+                    _lastTelemetryTime = now;
+
+                    // Ignore tiny velocities (sensor noise when hovering).
+                    const double deadzone = 4.0; // cm/s
+                    if (vgx.abs() >= deadzone || vgy.abs() >= deadzone) {
+                      // vgx = forward/backward (body frame), vgy = right/left (body frame).
+                      // Rotate body-frame velocity into world frame using current yaw.
+                      final double rad = _droneYaw * math.pi / 180.0;
+                      final double dx = vgx * math.sin(rad) + vgy * math.cos(rad);
+                      final double dy = vgx * math.cos(rad) - vgy * math.sin(rad);
+
+                      _currentDroneX += dx * dt;
+                      _currentDroneY -= dy * dt;
+                      _dronePath.add(Offset(_currentDroneX, _currentDroneY));
+                    }
+                  }
                 });
               }
             }
@@ -482,6 +528,32 @@ class _DroneDashboardState extends State<DroneDashboard> {
     );
   }
 
+  Future<void> _toggleAiVision() async {
+    try {
+      final res = await http.post(
+        Uri.parse('http://$backendHost/detection/toggle'),
+      );
+      final data = jsonDecode(res.body);
+      if (data['success'] == true && mounted) {
+        setState(() => aiVisionEnabled = data['enabled'] == true);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              aiVisionEnabled
+                  ? 'AI Erkennung aktiviert'
+                  : 'AI Erkennung deaktiviert',
+            ),
+            backgroundColor:
+                aiVisionEnabled ? Colors.blueAccent : Colors.grey,
+            duration: const Duration(seconds: 1),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('Fehler bei AI-Toggle: $e');
+    }
+  }
+
   KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
     if (!isConnected) return KeyEventResult.ignored;
 
@@ -692,7 +764,7 @@ class _DroneDashboardState extends State<DroneDashboard> {
           icon: Icons.person_search,
           color: aiVisionEnabled ? Colors.blueAccent : Colors.white,
           label: 'AI Erkennung',
-          onTap: () => setState(() => aiVisionEnabled = !aiVisionEnabled),
+          onTap: _toggleAiVision,
         ),
         const SizedBox(height: 15),
         _buildHudButton(
@@ -718,30 +790,16 @@ class _DroneDashboardState extends State<DroneDashboard> {
       crossAxisAlignment: CrossAxisAlignment.end,
       children: [
         GlassContainer(
-          width: 150,
-          height: 120,
-          child: Stack(
-            children: [
-              const Center(
-                child: Icon(
-                  Icons.map_outlined,
-                  color: Colors.white54,
-                  size: 40,
-                ),
+          width: 200,
+          height: 200,
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(15.0),
+            child: CustomPaint(
+              painter: DroneMapPainter(
+                path: _dronePath,
+                droneYaw: _droneYaw,
               ),
-              Positioned(
-                top: 50,
-                left: 70,
-                child: Container(
-                  width: 10,
-                  height: 10,
-                  decoration: const BoxDecoration(
-                    color: Colors.blueAccent,
-                    shape: BoxShape.circle,
-                  ),
-                ),
-              ),
-            ],
+            ),
           ),
         ),
         const SizedBox(height: 10),
@@ -886,3 +944,177 @@ class _DroneDashboardState extends State<DroneDashboard> {
     );
   }
 }
+
+class DroneMapPainter extends CustomPainter {
+  final List<Offset> path;
+  final double droneYaw;
+
+  DroneMapPainter({required this.path, required this.droneYaw});
+
+  static const int _maxTrail = 1000;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    _drawBackground(canvas, size);
+    _drawGrid(canvas, size);
+
+    final center = Offset(size.width / 2, size.height / 2);
+
+    if (path.isEmpty) {
+      _drawDrone(canvas, center);
+      _drawNorthLabel(canvas, size);
+      return;
+    }
+
+    final droneWorld = path.last;
+    final scale = _computeScale(size);
+
+    Offset toScreen(Offset world) => center + (world - droneWorld) * scale;
+
+    final trailStart = path.length > _maxTrail ? path.length - _maxTrail : 0;
+    _drawTrail(canvas, trailStart, toScreen);
+
+    if (path.length > 1) {
+      _drawStartMarker(canvas, toScreen(path.first));
+    }
+
+    _drawDrone(canvas, center);
+    _drawNorthLabel(canvas, size);
+  }
+
+  double _computeScale(Size size) {
+    if (path.length < 2) return 10.0;
+
+    double minX = path[0].dx, maxX = path[0].dx;
+    double minY = path[0].dy, maxY = path[0].dy;
+    for (final p in path) {
+      if (p.dx < minX) minX = p.dx;
+      if (p.dx > maxX) maxX = p.dx;
+      if (p.dy < minY) minY = p.dy;
+      if (p.dy > maxY) maxY = p.dy;
+    }
+    final extent = math.max(maxX - minX, maxY - minY);
+    if (extent < 0.5) return 10.0;
+    final available = math.min(size.width, size.height) * 0.75;
+    return (available / extent).clamp(2.0, 40.0);
+  }
+
+  void _drawBackground(Canvas canvas, Size size) {
+    canvas.drawRect(
+      Rect.fromLTWH(0, 0, size.width, size.height),
+      Paint()..color = const Color(0xFF060D1A),
+    );
+  }
+
+  void _drawGrid(Canvas canvas, Size size) {
+    final gridPaint = Paint()
+      ..color = const Color(0xFF112233)
+      ..strokeWidth = 0.5;
+
+    const step = 25.0;
+    for (double x = 0; x <= size.width; x += step) {
+      canvas.drawLine(Offset(x, 0), Offset(x, size.height), gridPaint);
+    }
+    for (double y = 0; y <= size.height; y += step) {
+      canvas.drawLine(Offset(0, y), Offset(size.width, y), gridPaint);
+    }
+
+    final axisPaint = Paint()
+      ..color = const Color(0xFF1E3A5F)
+      ..strokeWidth = 1.0;
+    canvas.drawLine(Offset(size.width / 2, 0), Offset(size.width / 2, size.height), axisPaint);
+    canvas.drawLine(Offset(0, size.height / 2), Offset(size.width, size.height / 2), axisPaint);
+  }
+
+  void _drawTrail(Canvas canvas, int startIdx, Offset Function(Offset) toScreen) {
+    final total = path.length - startIdx;
+    if (total < 2) return;
+
+    for (int i = startIdx + 1; i < path.length; i++) {
+      final t = (i - startIdx) / total;
+      final color = Color.lerp(
+        const Color(0xFF004466).withValues(alpha: 0),
+        const Color(0xFF00E5FF),
+        t * t,
+      )!;
+
+      canvas.drawLine(
+        toScreen(path[i - 1]),
+        toScreen(path[i]),
+        Paint()
+          ..color = color
+          ..strokeWidth = 1.5 + t * 2.0
+          ..strokeCap = StrokeCap.round,
+      );
+    }
+  }
+
+  void _drawStartMarker(Canvas canvas, Offset pos) {
+    canvas.drawCircle(
+      pos,
+      7,
+      Paint()
+        ..color = const Color(0xFF00FF88).withValues(alpha: 0.3)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 6),
+    );
+    canvas.drawCircle(pos, 4, Paint()..color = const Color(0xFF00FF88));
+    canvas.drawCircle(
+      pos,
+      4,
+      Paint()
+        ..color = Colors.white.withValues(alpha: 0.6)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.0,
+    );
+  }
+
+  void _drawDrone(Canvas canvas, Offset pos) {
+    canvas.save();
+    canvas.translate(pos.dx, pos.dy);
+    canvas.rotate(droneYaw * math.pi / 180.0);
+
+    final arrowPath = Path()
+      ..moveTo(0, -14)
+      ..lineTo(8, 7)
+      ..lineTo(0, 2)
+      ..lineTo(-8, 7)
+      ..close();
+
+    canvas.drawPath(
+      arrowPath,
+      Paint()
+        ..color = const Color(0xFF00E5FF).withValues(alpha: 0.45)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 10),
+    );
+    canvas.drawPath(arrowPath, Paint()..color = const Color(0xFF00E5FF));
+    canvas.drawPath(
+      arrowPath,
+      Paint()
+        ..color = Colors.white
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.0,
+    );
+
+    canvas.restore();
+  }
+
+  void _drawNorthLabel(Canvas canvas, Size size) {
+    final tp = TextPainter(
+      text: const TextSpan(
+        text: 'N ↑',
+        style: TextStyle(
+          color: Color(0xFF3A7A9E),
+          fontSize: 9,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    tp.paint(canvas, Offset(size.width / 2 - tp.width / 2, 3));
+  }
+
+  @override
+  bool shouldRepaint(covariant DroneMapPainter old) =>
+      old.path.length != path.length || old.droneYaw != droneYaw;
+}
+
