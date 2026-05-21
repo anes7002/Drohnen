@@ -52,6 +52,15 @@ auto_flight_active = False
 video_streaming = False
 video_cap = None
 
+# Object/person detection state
+detection_enabled = False
+_hog = cv2.HOGDescriptor()
+_hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+_face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+_detection_boxes: list = []
+_detection_frame_count = 0
+_DETECT_EVERY_N = 3  # run detection on every 3rd frame
+
 
 @app.post("/connect")
 async def connect(data: dict):
@@ -97,6 +106,18 @@ async def disconnect():
     control = None
     telemetry = None
     return {"success": True}
+
+
+@app.post("/detection/toggle")
+async def toggle_detection():
+    global detection_enabled
+    detection_enabled = not detection_enabled
+    return {"success": True, "enabled": detection_enabled}
+
+
+@app.get("/detection/status")
+async def detection_status():
+    return {"enabled": detection_enabled}
 
 
 @app.post("/command")
@@ -312,6 +333,47 @@ async def execute_flugkurs(course_id: int):
     return {"success": True}
 
 
+def _detect_objects(frame):
+    """Run HOG person and Haar face detection on a downscaled frame. Returns list of (x,y,w,h,label)."""
+    h, w = frame.shape[:2]
+    scale_w = w / 320
+    scale_h = h / 240
+    small = cv2.resize(frame, (320, 240))
+    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+
+    results = []
+
+    # HOG full-person detection
+    boxes, _ = _hog.detectMultiScale(small, winStride=(8, 8), padding=(4, 4), scale=1.05)
+    for (x, y, bw, bh) in boxes:
+        results.append((
+            int(x * scale_w), int(y * scale_h),
+            int(bw * scale_w), int(bh * scale_h),
+            "Person",
+        ))
+
+    # Haar frontal face detection
+    faces = _face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(20, 20))
+    for (x, y, bw, bh) in faces:
+        results.append((
+            int(x * scale_w), int(y * scale_h),
+            int(bw * scale_w), int(bh * scale_h),
+            "Gesicht",
+        ))
+
+    return results
+
+
+def _draw_detections(frame, boxes):
+    """Draw bounding boxes and labels onto the frame in-place."""
+    colors = {"Person": (0, 255, 0), "Gesicht": (0, 120, 255)}
+    for (x, y, w, h, label) in boxes:
+        color = colors.get(label, (255, 255, 0))
+        cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
+        cv2.putText(frame, label, (x, max(y - 6, 12)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2, cv2.LINE_AA)
+
+
 @app.websocket("/video")
 async def video_stream(websocket: WebSocket):
     """Stream video frames from the Tello drone via WebSocket as base64 JPEG."""
@@ -323,7 +385,6 @@ async def video_stream(websocket: WebSocket):
         return
 
     # Tello streams on UDP port 11111
-    drone_ip = drone_connection.ip_address
     cap = cv2.VideoCapture(f"udp://@0.0.0.0:11111", cv2.CAP_FFMPEG)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
@@ -334,13 +395,19 @@ async def video_stream(websocket: WebSocket):
 
     try:
         loop = asyncio.get_running_loop()
+        global _detection_boxes, _detection_frame_count
         while True:
             ret, frame = await loop.run_in_executor(None, cap.read)
             if not ret:
                 await asyncio.sleep(0.03)
                 continue
 
-            # Encode frame as JPEG
+            if detection_enabled:
+                _detection_frame_count += 1
+                if _detection_frame_count % _DETECT_EVERY_N == 0:
+                    _detection_boxes = await loop.run_in_executor(None, _detect_objects, frame)
+                _draw_detections(frame, _detection_boxes)
+
             _, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
             jpg_b64 = base64.b64encode(buffer).decode("utf-8")
 

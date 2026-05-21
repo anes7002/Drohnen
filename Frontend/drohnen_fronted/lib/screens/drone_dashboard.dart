@@ -527,6 +527,32 @@ class _DroneDashboardState extends State<DroneDashboard> {
     );
   }
 
+  Future<void> _toggleAiVision() async {
+    try {
+      final res = await http.post(
+        Uri.parse('http://$backendHost/detection/toggle'),
+      );
+      final data = jsonDecode(res.body);
+      if (data['success'] == true && mounted) {
+        setState(() => aiVisionEnabled = data['enabled'] == true);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              aiVisionEnabled
+                  ? 'AI Erkennung aktiviert'
+                  : 'AI Erkennung deaktiviert',
+            ),
+            backgroundColor:
+                aiVisionEnabled ? Colors.blueAccent : Colors.grey,
+            duration: const Duration(seconds: 1),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('Fehler bei AI-Toggle: $e');
+    }
+  }
+
   KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
     if (!isConnected) return KeyEventResult.ignored;
 
@@ -726,7 +752,7 @@ class _DroneDashboardState extends State<DroneDashboard> {
           icon: Icons.person_search,
           color: aiVisionEnabled ? Colors.blueAccent : Colors.white,
           label: 'AI Erkennung',
-          onTap: () => setState(() => aiVisionEnabled = !aiVisionEnabled),
+          onTap: _toggleAiVision,
         ),
         const SizedBox(height: 15),
         _buildHudButton(
