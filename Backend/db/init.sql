@@ -20,6 +20,13 @@ CREATE TABLE flugkurs (
 CREATE TABLE video (
     id SERIAL PRIMARY KEY,
     drohnen_id INTEGER REFERENCES drohne(id) ON DELETE CASCADE,
-    dateipfad TEXT NOT NULL, 
+    dateipfad TEXT NOT NULL,
     aufnahmedatum TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Tabelle für Aufnahmen (vom Backend verwendet)
+CREATE TABLE recordings (
+    id SERIAL PRIMARY KEY,
+    filename TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
