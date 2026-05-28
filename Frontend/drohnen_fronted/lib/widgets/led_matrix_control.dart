@@ -471,7 +471,7 @@ class _LedMatrixControlState extends State<LedMatrixControl> {
                 label: 'Robomaster',
                 icon: Icons.restore,
                 color: Colors.blueGrey[700]!,
-                onPressed: _loadTtPattern,
+                onPressed: _loadPattern,
               ),
             ),
             const SizedBox(width: 6),

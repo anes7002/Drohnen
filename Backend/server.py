@@ -245,7 +245,13 @@ async def set_mled(data: dict):
     # Wenn die Matrix aus ist, das Muster nur speichern und nicht anzeigen.
     blinking = _mled_blink_task is not None and not _mled_blink_task.done()
     if _mled_on and not blinking:
-        drone_connection.send_command(f"ext mled g {pattern}")
+        loop = asyncio.get_running_loop()
+        resp = await loop.run_in_executor(
+            None, drone_connection.send_command_with_response, f"ext mled g {pattern}"
+        )
+        print(f"[MLED] Drohnen-Antwort (grid): {resp!r}")
+        if resp not in ("ok", "OK"):
+            return {"success": False, "error": f"Drohne: {resp}"}
     return {"success": True}
 
 
@@ -307,7 +313,14 @@ async def mled_scroll(data: dict):
         return {"success": False, "error": "Farbe muss r/b/p sein"}
 
     await _stop_blink()
-    drone_connection.send_command(f"ext mled {direction} {color} {freq} {text}")
+    loop = asyncio.get_running_loop()
+    resp = await loop.run_in_executor(
+        None, drone_connection.send_command_with_response,
+        f"ext mled {direction} {color} {freq} {text}"
+    )
+    print(f"[MLED] Drohnen-Antwort (scroll): {resp!r}")
+    if resp not in ("ok", "OK"):
+        return {"success": False, "error": f"Drohne: {resp}"}
     return {"success": True}
 
 
