@@ -22,6 +22,8 @@ except ImportError:
     DB_AVAILABLE = False
 
 import detection
+import ring_detection
+from ring_navigator import RingNavigator
 from drone import DroneConnection, Control, Telemetry, StatusLED
 
 
@@ -76,6 +78,10 @@ status_led: StatusLED | None = None
 # Wird auf True gesetzt, während ein gespeicherter Flugkurs abläuft.
 # Während dieser Zeit werden manuelle RC-Eingaben ignoriert.
 auto_flight_active = False
+
+# Ring-Modus: autonomes Durchfliegen von Ringen
+ring_mode_active = False
+ring_navigator: RingNavigator | None = None
 
 # Tello EDU matrix: 64 chars, each '0'=off, 'r'=red, 'b'=blue, 'p'=purple
 _TT_PATTERN = "00rrrr000r0000r0r0r00r0rr000000rr0r00r0rr00rr00r0r0000r000rrrr00"
@@ -145,7 +151,13 @@ async def connect(data: dict):
 
 @app.post("/disconnect")
 async def disconnect():
-    global control, telemetry, status_led
+    global control, telemetry, status_led, ring_mode_active, ring_navigator
+
+    if ring_mode_active and ring_navigator is not None:
+        ring_navigator.stop()
+        ring_mode_active = False
+        ring_detection.enabled = False
+        ring_navigator = None
 
     if drone_connection.connected:
         if status_led:
@@ -337,6 +349,75 @@ async def toggle_detection():
 @app.get("/detection/status")
 async def detection_status():
     return {"enabled": detection.enabled}
+
+
+# ---------------------------------------------------------------------------
+# Ring-Modus-Endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/ring/toggle")
+async def toggle_ring_mode():
+    global ring_mode_active, ring_navigator
+
+    if not drone_connection.connected or control is None:
+        return {"success": False, "error": "Nicht verbunden"}
+
+    ring_mode_active = not ring_mode_active
+    ring_detection.enabled = ring_mode_active
+
+    if ring_mode_active:
+        ring_navigator = RingNavigator(control, frame_width=960, frame_height=720)
+        ring_navigator.start()
+        print("[RING] Ring-Modus aktiviert")
+    else:
+        if ring_navigator is not None:
+            ring_navigator.stop()
+        ring_detection.ring = None
+        print("[RING] Ring-Modus deaktiviert")
+
+    return {"success": True, "enabled": ring_mode_active}
+
+
+@app.get("/ring/status")
+async def ring_status():
+    status = ring_navigator.get_status() if ring_navigator is not None else {}
+    return {
+        "enabled": ring_mode_active,
+        "state": status.get("state", "idle"),
+        "ring_detected": status.get("ring_detected", False),
+        "cx": status.get("cx", 0),
+        "cy": status.get("cy", 0),
+        "radius": status.get("radius", 0),
+    }
+
+
+@app.post("/ring/config")
+async def ring_config(data: dict):
+    """Konfiguriert Ringerkennung (HSV-Farbe) und Navigationsparameter."""
+    if data.get("color") == "red":
+        ring_detection.set_color_red(
+            s_low=int(data.get("s_low", 80)),
+            v_low=int(data.get("v_low", 80)),
+        )
+    elif any(k in data for k in ("h_low", "h_high")):
+        ring_detection.set_color(
+            int(data.get("h_low", 5)),
+            int(data.get("h_high", 25)),
+            int(data.get("s_low", 80)),
+            int(data.get("s_high", 255)),
+            int(data.get("v_low", 80)),
+            int(data.get("v_high", 255)),
+        )
+    if ring_navigator is not None:
+        if "approach_radius" in data:
+            ring_navigator.APPROACH_RADIUS = int(data["approach_radius"])
+        if "pass_duration" in data:
+            ring_navigator.PASS_DURATION = float(data["pass_duration"])
+        if "forward_max" in data:
+            ring_navigator.FORWARD_MAX = int(data["forward_max"])
+        if "pass_speed" in data:
+            ring_navigator.PASS_SPEED = int(data["pass_speed"])
+    return {"success": True}
 
 
 # ---------------------------------------------------------------------------
@@ -682,6 +763,7 @@ async def video_stream(websocket: WebSocket):
         return
 
     loop = asyncio.get_running_loop()
+    _ring_size_set = False
 
     try:
         while True:
@@ -711,6 +793,29 @@ async def video_stream(websocket: WebSocket):
                         None, detection.detect, frame
                     )
                 detection.draw(frame, detection.boxes)
+
+            # --- Ring-Erkennung & autonome Navigation ---
+            if ring_detection.enabled:
+                ring_detection.frame_count += 1
+                if ring_detection.frame_count % ring_detection.DETECT_EVERY_N == 0:
+                    ring_detection.ring = await loop.run_in_executor(
+                        None, ring_detection.detect, frame
+                    )
+                ring_detection.draw(frame, ring_detection.ring)
+
+                if ring_navigator is not None:
+                    if not _ring_size_set:
+                        h_f, w_f = frame.shape[:2]
+                        ring_navigator.set_frame_size(w_f, h_f)
+                        _ring_size_set = True
+                    ring_navigator.update_ring(ring_detection.ring)
+
+                # State-Label ins Bild einblenden
+                state_label = ring_navigator.status.get("state", "") if ring_navigator else ""
+                cv2.putText(
+                    frame, f"Ring: {state_label}",
+                    (10, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (200, 0, 255), 2, cv2.LINE_AA,
+                )
 
             # --- Frame senden ---
             _, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
@@ -769,7 +874,7 @@ async def rc_control(websocket: WebSocket):
         """
         try:
             while websocket.client_state.value == 1:
-                if not auto_flight_active:
+                if not auto_flight_active and not ring_mode_active:
                     control.send_rc(last_rc["a"], last_rc["b"], last_rc["c"], last_rc["d"])
                 await asyncio.sleep(0.1)
         except Exception:
@@ -782,8 +887,8 @@ async def rc_control(websocket: WebSocket):
         while True:
             data = await websocket.receive_text()
 
-            if auto_flight_active:
-                continue  # Manuelle Eingaben während Flugkurs ignorieren
+            if auto_flight_active or ring_mode_active:
+                continue  # Manuelle Eingaben während Flugkurs/Ring-Modus ignorieren
 
             msg = json.loads(data)
             cmd = msg.get("command")

@@ -29,6 +29,7 @@ class _DroneDashboardState extends State<DroneDashboard> {
   bool isRecording = false;
   bool aiVisionEnabled = false;
   bool ringModeEnabled = false;
+  String _ringState = 'idle';
 
   // 2D Map State
   final List<Offset> _dronePath = [Offset.zero];
@@ -40,6 +41,7 @@ class _DroneDashboardState extends State<DroneDashboard> {
   final String backendHost =
       '127.0.0.1:8000'; // Bei Android Emulator ggf. auf 10.0.2.2:8000 ändern
   WebSocketChannel? _rcChannel;
+  Timer? _ringStatusTimer;
   String batteryLevel = '---';
   String droneHeight = '---';
   String droneSpeed = '---';
@@ -72,14 +74,17 @@ class _DroneDashboardState extends State<DroneDashboard> {
       _rcChannel?.sink.close();
 
       if (mounted) {
+        _stopRingStatusPolling();
         setState(() {
           isConnected = false;
+          ringModeEnabled = false;
+          _ringState = 'idle';
           batteryLevel = '---';
           droneHeight = '---';
           droneSpeed = '---';
           droneTime = '---';
           droneTemp = '---';
-          
+
           _dronePath.clear();
           _dronePath.add(Offset.zero);
           _currentDroneX = 0;
@@ -215,6 +220,7 @@ class _DroneDashboardState extends State<DroneDashboard> {
 
   @override
   void dispose() {
+    _ringStatusTimer?.cancel();
     _focusNode.dispose();
     _rcChannel?.sink.close();
     super.dispose();
@@ -554,6 +560,78 @@ class _DroneDashboardState extends State<DroneDashboard> {
     }
   }
 
+  Future<void> _toggleRingMode() async {
+    try {
+      final res = await http.post(
+        Uri.parse('http://$backendHost/ring/toggle'),
+      );
+      final data = jsonDecode(res.body);
+      if (data['success'] == true && mounted) {
+        setState(() => ringModeEnabled = data['enabled'] == true);
+        if (ringModeEnabled) {
+          _startRingStatusPolling();
+        } else {
+          _stopRingStatusPolling();
+          setState(() => _ringState = 'idle');
+        }
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                ringModeEnabled
+                    ? 'Ring-Modus aktiviert — Drohne sucht Ringe'
+                    : 'Ring-Modus deaktiviert',
+              ),
+              backgroundColor:
+                  ringModeEnabled ? Colors.purpleAccent : Colors.grey,
+              duration: const Duration(seconds: 2),
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      debugPrint('Fehler bei Ring-Toggle: $e');
+    }
+  }
+
+  void _startRingStatusPolling() {
+    _ringStatusTimer?.cancel();
+    _ringStatusTimer = Timer.periodic(
+      const Duration(milliseconds: 500),
+      (_) => _pollRingStatus(),
+    );
+  }
+
+  void _stopRingStatusPolling() {
+    _ringStatusTimer?.cancel();
+    _ringStatusTimer = null;
+  }
+
+  Future<void> _pollRingStatus() async {
+    try {
+      final res = await http.get(Uri.parse('http://$backendHost/ring/status'));
+      final data = jsonDecode(res.body);
+      if (mounted) {
+        setState(() => _ringState = (data['state'] as String?) ?? 'idle');
+      }
+    } catch (_) {}
+  }
+
+  String _ringStateLabel() {
+    switch (_ringState) {
+      case 'searching':
+        return 'Suche Ring...';
+      case 'aligning':
+        return 'Ausrichten';
+      case 'approaching':
+        return 'Annähern';
+      case 'passing':
+        return 'Durchflug!';
+      default:
+        return 'Bereit';
+    }
+  }
+
   KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
     if (!isConnected) return KeyEventResult.ignored;
 
@@ -771,7 +849,7 @@ class _DroneDashboardState extends State<DroneDashboard> {
           icon: Icons.adjust,
           color: ringModeEnabled ? Colors.purpleAccent : Colors.white,
           label: 'Ring-Modus',
-          onTap: () => setState(() => ringModeEnabled = !ringModeEnabled),
+          onTap: _toggleRingMode,
         ),
         const SizedBox(height: 15),
         _buildHudButton(
@@ -827,6 +905,40 @@ class _DroneDashboardState extends State<DroneDashboard> {
             ),
           ),
         ),
+        if (ringModeEnabled) ...[
+          const SizedBox(height: 10),
+          GlassContainer(
+            width: 150,
+            child: Padding(
+              padding: const EdgeInsets.all(12.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Ring-Modus',
+                    style: TextStyle(
+                      color: Colors.purpleAccent,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 11,
+                    ),
+                  ),
+                  const SizedBox(height: 5),
+                  Text(
+                    _ringStateLabel(),
+                    style: TextStyle(
+                      color: _ringState == 'passing'
+                          ? Colors.greenAccent
+                          : Colors.white,
+                      fontWeight: _ringState == 'passing'
+                          ? FontWeight.bold
+                          : FontWeight.normal,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
       ],
     );
   }
