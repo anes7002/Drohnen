@@ -1,7 +1,7 @@
-import 'dart:convert';
 import 'dart:typed_data';
 import 'package:drohnen_fronted/models/saved_recording.dart';
 import 'package:flutter/material.dart';
+import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
@@ -30,7 +30,10 @@ class _VideoDialogState extends State<VideoDialog> {
   bool _loading = true;
   bool _isRecording = false;
   WebSocketChannel? _channel;
-  Uint8List? _latestFrame;
+
+  // ValueNotifier statt setState → nur das Image-Widget wird neu gezeichnet,
+  // nicht der gesamte Dialog-Baum.
+  final ValueNotifier<Uint8List?> _frameNotifier = ValueNotifier(null);
 
   @override
   void initState() {
@@ -44,10 +47,17 @@ class _VideoDialogState extends State<VideoDialog> {
       Uri.parse('ws://${widget.backendHost}/video'),
     );
     _channel!.stream.listen((message) {
-      if (mounted) {
-        setState(() {
-          _latestFrame = base64Decode(message);
-        });
+      if (!mounted) return;
+      // base64-Text (Flutter Web kompatibel)
+      if (message is String) {
+        try {
+          _frameNotifier.value = base64Decode(message);
+        } catch (_) { /* kein gültiges Bild */ }
+      } else if (message is Uint8List) {
+        // native Apps (Android/iOS/Desktop)
+        _frameNotifier.value = message;
+      } else if (message is List<int>) {
+        _frameNotifier.value = Uint8List.fromList(message);
       }
     });
   }
@@ -86,6 +96,7 @@ class _VideoDialogState extends State<VideoDialog> {
   @override
   void dispose() {
     _channel?.sink.close();
+    _frameNotifier.dispose();
     super.dispose();
   }
 
@@ -97,9 +108,23 @@ class _VideoDialogState extends State<VideoDialog> {
         width: 400,
         child: Column(
           children: [
-            Container(
-              height: 200, color: Colors.black,
-              child: _latestFrame != null ? Image.memory(_latestFrame!) : const SizedBox(),
+            // RepaintBoundary isoliert Neuzeichnungen auf dieses Widget.
+            // ValueListenableBuilder löst keinen setState auf dem ganzen Dialog aus.
+            RepaintBoundary(
+              child: ValueListenableBuilder<Uint8List?>(
+                valueListenable: _frameNotifier,
+                builder: (_, frame, _) => Container(
+                  height: 200,
+                  color: Colors.black,
+                  child: frame != null
+                      ? Image.memory(
+                          frame,
+                          gaplessPlayback: true, // kein Flackern zwischen Frames
+                          fit: BoxFit.contain,
+                        )
+                      : const SizedBox(),
+                ),
+              ),
             ),
             ElevatedButton(
               onPressed: _toggleRecording,
@@ -114,7 +139,7 @@ class _VideoDialogState extends State<VideoDialog> {
                   title: Text(_savedRecordings[i].toString()), 
                   trailing: IconButton(
                     icon: const Icon(Icons.delete),
-                    onPressed: () => _deleteRecording(_savedRecordings[i].id!),
+                    onPressed: () => _deleteRecording(_savedRecordings[i].id),
                   ),
                 ),
               ),

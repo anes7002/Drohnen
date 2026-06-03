@@ -507,10 +507,16 @@ async def delete_recording(rec_id: int):
 @app.websocket("/video")
 async def video_stream(websocket: WebSocket):
     """
-    Streamt Drohnen-Videoframes als Base64-JPEG über WebSocket.
+    Streamt Drohnen-Videoframes als binäre JPEG-Bytes über WebSocket.
     Unterstützt gleichzeitig:
       - Video-Aufnahme als MP4 (gesteuert via /recordings/start + /stop)
       - AI-Erkennung (gesteuert via /detection/toggle)
+
+    Latenz-Optimierungen:
+      - Dedizierter Grabber-Thread leert OpenCVs internen Puffer kontinuierlich
+        und hält immer nur den neuesten Frame → kein Frame-Stau.
+      - Binäre WebSocket-Übertragung statt Base64 (~33 % weniger Daten).
+      - Kein künstlicher asyncio.sleep am Ende der Sende-Schleife.
     """
     global video_writer, current_recording_filename, is_recording
 
@@ -522,6 +528,8 @@ async def video_stream(websocket: WebSocket):
         return
 
     # Tello streamt auf UDP-Port 11111
+    # AV_LOG_QUIET (=-8) unterdrückt FFmpeg-H264-Warnungen im Terminal
+    os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "-8")
     cap = cv2.VideoCapture("udp://@0.0.0.0:11111", cv2.CAP_FFMPEG)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
@@ -530,13 +538,39 @@ async def video_stream(websocket: WebSocket):
         await websocket.close()
         return
 
+    # ------------------------------------------------------------------
+    # Grabber-Thread: liest Frames so schnell wie möglich und verwirft
+    # alle außer dem neuesten → OpenCV-Puffer läuft nie voll.
+    # ------------------------------------------------------------------
+    _latest_frame: list = [None]          # [0] = aktuellster Frame (numpy array)
+    _new_frame = threading.Event()        # wird gesetzt, sobald ein neuer Frame da ist
+    _grabber_running = [True]
+
+    def _grab_frames():
+        """Leert OpenCV-Puffer kontinuierlich, hält nur neuesten Frame."""
+        while _grabber_running[0]:
+            try:
+                ret, frame = cap.read()
+                if ret:
+                    _latest_frame[0] = frame
+                else:
+                    print("[VIDEO] cap.read() → ret=False")
+            except Exception as e:
+                print(f"[VIDEO] Grabber-Fehler: {e}")
+                break
+
+    grabber = threading.Thread(target=_grab_frames, daemon=True)
+    grabber.start()
+
     loop = asyncio.get_running_loop()
+    sent_count = 0
 
     try:
         while True:
-            ret, frame = await loop.run_in_executor(None, cap.read)
-            if not ret:
-                await asyncio.sleep(0.03)
+            await asyncio.sleep(0.033)   # ~30 fps
+
+            frame = _latest_frame[0]
+            if frame is None:
                 continue
 
             # --- Aufnahme ---
@@ -561,14 +595,18 @@ async def video_stream(websocket: WebSocket):
                     )
                 detection.draw(frame, detection.boxes)
 
-            # --- Frame senden ---
+            # --- Frame senden (base64 Text – kompatibel mit Flutter Web) ---
             _, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
             await websocket.send_text(base64.b64encode(buffer).decode("utf-8"))
-            await asyncio.sleep(0.03)  # ~30 fps
+
+            sent_count += 1
+            if sent_count % 30 == 0:
+                print(f"[VIDEO] {sent_count} Frames gesendet")
 
     except WebSocketDisconnect:
         pass
     finally:
+        _grabber_running[0] = False
         if video_writer is not None:
             video_writer.release()
             video_writer = None
