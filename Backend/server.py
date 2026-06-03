@@ -14,6 +14,7 @@ os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")  # suppress FFmpeg H.264 deco
 import cv2
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 try:
     import psycopg2
@@ -714,6 +715,27 @@ async def get_recordings():
         return {"success": True, "data": data}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+@app.get("/recordings/{rec_id}/video")
+async def serve_recording_video(rec_id: int):
+    if DB_AVAILABLE:
+        try:
+            with db_cursor() as cur:
+                cur.execute("SELECT filename FROM recordings WHERE id = %s", (rec_id,))
+                row = cur.fetchone()
+                if row:
+                    filepath = os.path.join(RECORDINGS_DIR, row[0])
+                    if os.path.exists(filepath):
+                        return FileResponse(filepath, media_type="video/mp4")
+        except Exception:
+            pass
+    # Fallback: search by index in filesystem
+    files = sorted([f for f in os.listdir(RECORDINGS_DIR) if f.endswith(".mp4")])
+    if 0 <= rec_id < len(files):
+        filepath = os.path.join(RECORDINGS_DIR, files[rec_id])
+        return FileResponse(filepath, media_type="video/mp4")
+    return {"success": False, "error": "Nicht gefunden"}
 
 
 @app.delete("/recordings/{rec_id}")
