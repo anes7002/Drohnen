@@ -9,7 +9,10 @@ import time
 from contextlib import contextmanager
 from datetime import datetime
 
-os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")  # suppress FFmpeg H.264 decode noise
+os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")  # OpenCV-Logger leiser stellen
+# FFmpeg-AVLog auf "fatal" (8) → unterdrückt das harmlose H.264-Dekodier-Rauschen
+# ("error while decoding MB ... bytestream -6"), das bei UDP-Streams normal ist.
+os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "8")
 
 import cv2
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -79,6 +82,86 @@ status_led: StatusLED | None = None
 # Während dieser Zeit werden manuelle RC-Eingaben ignoriert.
 auto_flight_active = False
 
+# Globale VideoCapture — einmal geöffnet beim Drone-Connect, damit Port 11111 nicht
+# bei jeder WebSocket-Verbindung neu gebunden wird (verhindert WSAEADDRINUSE -10048).
+_video_cap: cv2.VideoCapture | None = None
+
+# Ein dedizierter Hintergrund-Thread liest KONTINUIERLICH Frames und hält nur den
+# neuesten. Das hält den UDP-/FFmpeg-Puffer ständig geleert → deutlich weniger
+# H.264-Dekodierfehler und kein Lag. Der WebSocket greift nur den letzten Frame ab.
+_latest_frame = None
+_frame_lock = threading.Lock()
+_grabber_running = False
+_grabber_thread: threading.Thread | None = None
+
+
+def _frame_grabber() -> None:
+    """
+    Öffnet den UDP-Stream im eigenen Thread (blockiert NICHT den Event-Loop),
+    liest dann dauerhaft Frames (drainiert den Puffer) und übernimmt die Aufnahme.
+    """
+    global _latest_frame, _video_cap, video_writer, current_recording_filename, is_recording
+
+    # fifo_size vergrößert den UDP-Empfangspuffer → weniger verworfene Pakete.
+    cap = cv2.VideoCapture(
+        "udp://@0.0.0.0:11111?overrun_nonfatal=1&fifo_size=5000000",
+        cv2.CAP_FFMPEG,
+    )
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    if not cap.isOpened():
+        cap.release()
+        print("[WARN] Video-Stream konnte nicht geöffnet werden (Port 11111 belegt?)")
+        return
+    _video_cap = cap
+
+    try:
+        while _grabber_running:
+            ret, frame = cap.read()
+            if not ret:
+                time.sleep(0.005)
+                continue
+
+            # --- Aufnahme (rohe Frames in voller Rate, ohne Overlays) ---
+            if is_recording:
+                if video_writer is None:
+                    h, w = frame.shape[:2]
+                    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                    current_recording_filename = f"drohne_{int(time.time())}.mp4"
+                    filepath = os.path.join(RECORDINGS_DIR, current_recording_filename)
+                    video_writer = cv2.VideoWriter(filepath, fourcc, 30.0, (w, h))
+                video_writer.write(frame)
+            elif video_writer is not None:
+                video_writer.release()
+                video_writer = None
+
+            with _frame_lock:
+                _latest_frame = frame
+    finally:
+        if video_writer is not None:
+            video_writer.release()
+            video_writer = None
+        cap.release()
+        _video_cap = None
+        with _frame_lock:
+            _latest_frame = None
+
+
+def _open_video_cap() -> None:
+    global _grabber_running, _grabber_thread
+    _close_video_cap()
+    _grabber_running = True
+    _grabber_thread = threading.Thread(target=_frame_grabber, daemon=True)
+    _grabber_thread.start()
+
+
+def _close_video_cap() -> None:
+    global _grabber_running, _grabber_thread, is_recording
+    _grabber_running = False
+    if _grabber_thread is not None:
+        _grabber_thread.join(timeout=2.0)
+        _grabber_thread = None
+    is_recording = False
+
 # Ring-Modus: autonomes Durchfliegen von Ringen
 ring_mode_active = False
 ring_navigator: RingNavigator | None = None
@@ -143,6 +226,7 @@ async def connect(data: dict):
         control = Control(drone_connection)
         telemetry = Telemetry(drone_connection)
         print("[INFO] Steuerung und Telemetrie initialisiert")
+        _open_video_cap()
     else:
         status_led.error()
 
@@ -164,6 +248,7 @@ async def disconnect():
             status_led.off()
         drone_connection.send_command("streamoff")
 
+    _close_video_cap()
     drone_connection.disconnect()
     control = None
     telemetry = None
@@ -185,8 +270,10 @@ async def set_led(data: dict):
     freq = float(data.get("freq", 1.0))
 
     if blink:
-        # Tello EDU SDK: ext led bl <freq> <r1> <g1> <b1> <r2> <g2> <b2>
-        drone_connection.send_command(f"ext led bl {freq} {r} {g} {b} 0 0 0")
+        r2 = max(0, min(255, int(data.get("r2", 0))))
+        g2 = max(0, min(255, int(data.get("g2", 0))))
+        b2 = max(0, min(255, int(data.get("b2", 0))))
+        drone_connection.send_command(f"ext led bl {freq} {r} {g} {b} {r2} {g2} {b2}")
     else:
         drone_connection.send_command(f"ext led {r} {g} {b}")
 
@@ -257,13 +344,7 @@ async def set_mled(data: dict):
     # Wenn die Matrix aus ist, das Muster nur speichern und nicht anzeigen.
     blinking = _mled_blink_task is not None and not _mled_blink_task.done()
     if _mled_on and not blinking:
-        loop = asyncio.get_running_loop()
-        resp = await loop.run_in_executor(
-            None, drone_connection.send_command_with_response, f"ext mled g {pattern}"
-        )
-        print(f"[MLED] Drohnen-Antwort (grid): {resp!r}")
-        if resp not in ("ok", "OK"):
-            return {"success": False, "error": f"Drohne: {resp}"}
+        drone_connection.send_command(f"ext mled g {pattern}")
     return {"success": True}
 
 
@@ -744,8 +825,6 @@ async def video_stream(websocket: WebSocket):
       - Video-Aufnahme als MP4 (gesteuert via /recordings/start + /stop)
       - AI-Erkennung (gesteuert via /detection/toggle)
     """
-    global video_writer, current_recording_filename, is_recording
-
     await websocket.accept()
 
     if not drone_connection.connected:
@@ -753,37 +832,33 @@ async def video_stream(websocket: WebSocket):
         await websocket.close()
         return
 
-    # Tello streamt auf UDP-Port 11111
-    cap = cv2.VideoCapture("udp://@0.0.0.0:11111?overrun_nonfatal=1", cv2.CAP_FFMPEG)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-
-    if not cap.isOpened():
-        await websocket.send_json({"error": "Video-Stream konnte nicht geöffnet werden"})
+    # Auf den ersten Frame warten — der Grabber-Thread öffnet den Stream asynchron.
+    waited = 0.0
+    while _latest_frame is None and waited < 10.0 and drone_connection.connected:
+        await asyncio.sleep(0.1)
+        waited += 0.1
+    if _latest_frame is None:
+        await websocket.send_json({"error": "Kein Videosignal"})
         await websocket.close()
         return
 
     loop = asyncio.get_running_loop()
     _ring_size_set = False
 
+    def _encode(f) -> bytes:
+        ok, buf = cv2.imencode(".jpg", f, [cv2.IMWRITE_JPEG_QUALITY, 60])
+        return buf.tobytes() if ok else b""
+
     try:
         while True:
-            ret, frame = await loop.run_in_executor(None, cap.read)
-            if not ret:
-                await asyncio.sleep(0.03)
-                continue
+            # Neuesten Frame vom Grabber-Thread abgreifen (Kopie, damit Overlays
+            # das geteilte Bild nicht verändern).
+            with _frame_lock:
+                frame = None if _latest_frame is None else _latest_frame.copy()
 
-            # --- Aufnahme ---
-            if is_recording:
-                if video_writer is None:
-                    h, w = frame.shape[:2]
-                    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                    current_recording_filename = f"drohne_{int(time.time())}.mp4"
-                    filepath = os.path.join(RECORDINGS_DIR, current_recording_filename)
-                    video_writer = cv2.VideoWriter(filepath, fourcc, 30.0, (w, h))
-                video_writer.write(frame)
-            elif video_writer is not None:
-                video_writer.release()
-                video_writer = None
+            if frame is None:
+                await asyncio.sleep(0.02)
+                continue
 
             # --- AI-Erkennung ---
             if detection.enabled:
@@ -817,24 +892,30 @@ async def video_stream(websocket: WebSocket):
                     (10, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (200, 0, 255), 2, cv2.LINE_AA,
                 )
 
-            # --- Frame senden ---
-            _, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
-            await websocket.send_text(base64.b64encode(buffer).decode("utf-8"))
+            # --- Frame senden (Encoding im Executor, blockiert den Loop nicht) ---
+            jpg = await loop.run_in_executor(None, _encode, frame)
+            if jpg:
+                await websocket.send_text(base64.b64encode(jpg).decode("utf-8"))
             await asyncio.sleep(0.03)  # ~30 fps
 
     except WebSocketDisconnect:
         pass
-    finally:
-        if video_writer is not None:
-            video_writer.release()
-            video_writer = None
-            is_recording = False
-        cap.release()
 
 
 # ---------------------------------------------------------------------------
 # WebSocket: RC-Steuerung & Telemetrie
 # ---------------------------------------------------------------------------
+
+def _force_stop_all() -> None:
+    """Stoppt Ring-Modus und Flugkurs sofort (für Not-Aus / sicheres Trennen)."""
+    global ring_mode_active, ring_navigator, auto_flight_active
+    if ring_navigator is not None:
+        ring_navigator.stop()
+        ring_navigator = None
+    ring_mode_active = False
+    ring_detection.enabled = False
+    auto_flight_active = False
+
 
 @app.websocket("/rc")
 async def rc_control(websocket: WebSocket):
@@ -887,19 +968,27 @@ async def rc_control(websocket: WebSocket):
         while True:
             data = await websocket.receive_text()
 
-            if auto_flight_active or ring_mode_active:
-                continue  # Manuelle Eingaben während Flugkurs/Ring-Modus ignorieren
-
-            msg = json.loads(data)
+            try:
+                msg = json.loads(data)
+            except (ValueError, TypeError):
+                continue
             cmd = msg.get("command")
+
+            # Not-Aus hat IMMER Vorrang — auch während Ring-Modus/Flugkurs.
+            if cmd == "emergency":
+                _force_stop_all()
+                if control is not None:
+                    control.emergency_stop()
+                continue
+
+            if auto_flight_active or ring_mode_active:
+                continue  # Sonstige manuelle Eingaben während Auto-Flug ignorieren
 
             if cmd:
                 if cmd == "takeoff":
                     threading.Thread(target=control.takeoff, daemon=True).start()
                 elif cmd == "land":
                     threading.Thread(target=control.land, daemon=True).start()
-                elif cmd == "emergency":
-                    control.emergency_stop()
                 continue
 
             last_rc["a"] = int(msg.get("a", 0))
@@ -908,7 +997,7 @@ async def rc_control(websocket: WebSocket):
             last_rc["d"] = int(msg.get("d", 0))
 
     except WebSocketDisconnect:
-        if not auto_flight_active:
+        if control is not None and not auto_flight_active:
             control.send_rc(0, 0, 0, 0)
     finally:
         tele_task.cancel()

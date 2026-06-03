@@ -26,8 +26,9 @@ _single_lower: np.ndarray | None = None
 _single_upper: np.ndarray | None = None
 
 _SCALE: float = 0.4        # Resize-Faktor für schnellere Verarbeitung
-_MIN_AREA: int = 600        # Min. Konturenfläche auf dem skalierten Frame
-_MIN_ASPECT: float = 0.30   # Min. Ellipsen-Aspektverhältnis (zu klein = zu schräg)
+_MIN_AREA: int = 800        # Min. Konturenfläche auf dem skalierten Frame
+_MIN_ASPECT: float = 0.45   # Min. Ellipsen-Aspektverhältnis — Ringe sind runder als Menschen
+_MIN_HOLE_RATIO: float = 0.10  # Loch muss mind. 10 % der Gesamtfläche sein (Ring hat Loch)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -79,13 +80,17 @@ def detect(frame) -> tuple | None:
     """
     Erkennt das größte ringförmige Objekt in der konfigurierten Farbe.
 
+    Schlüsselidee: Ein Ring hat ein LOCH. Ein Mensch in roter Kleidung ist ein
+    solider Fleck. Über die Kontur-Hierarchie (RETR_CCOMP) erkennen wir, ob eine
+    rote Form innen ein echtes Loch hat — nur dann ist es ein Ring.
+
     Ablauf:
       1. Frame auf _SCALE verkleinern (Geschwindigkeit).
       2. HSV-Farb-Doppelmaske (Rot-Wraparound).
-      3. Morphologische Bereinigung (Lücken schließen, Rauschen entfernen).
-      4. Konturen finden, Ellipse anpassen.
-      5. Nach Fläche und Aspektverhältnis filtern.
-      6. Beste (cx, cy, radius_px) in Original-Frame-Koordinaten zurückgeben.
+      3. Leichte morphologische Bereinigung (Loch NICHT zuschließen).
+      4. Konturen MIT Hierarchie finden.
+      5. Außenkonturen behalten, die ein ausreichend großes Loch (Kind-Kontur) haben.
+      6. Nach Fläche, Rundheit und Loch-Größe filtern + bewerten.
     """
     h_orig, w_orig = frame.shape[:2]
     sw, sh = int(w_orig * _SCALE), int(h_orig * _SCALE)
@@ -94,33 +99,53 @@ def detect(frame) -> tuple | None:
     hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
     mask = _build_mask(hsv)
 
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+    # Nur Rauschen entfernen + dünne Lücken im Ring schließen — aber sanft,
+    # damit das große Loch in der Mitte erhalten bleibt.
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, hierarchy = cv2.findContours(
+        mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE
+    )
+    if hierarchy is None:
+        return None
+    hierarchy = hierarchy[0]  # Form: (N, 4) → [next, prev, first_child, parent]
 
     best: tuple | None = None
     best_score: float = 0.0
 
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if area < _MIN_AREA:
+    for i, cnt in enumerate(contours):
+        # Nur Außenkonturen (kein Elternteil) betrachten
+        if hierarchy[i][3] != -1:
             continue
-        if len(cnt) < 5:
+
+        area = cv2.contourArea(cnt)
+        if area < _MIN_AREA or len(cnt) < 5:
             continue
 
         ellipse = cv2.fitEllipse(cnt)
         (cx, cy), (minor_ax, major_ax), _ = ellipse
-
         if major_ax == 0:
             continue
 
         aspect = minor_ax / major_ax  # 1.0 = Kreis, 0.0 = Linie
         if aspect < _MIN_ASPECT:
-            continue  # Ring zu schräg angeflogen — überspringen
+            continue  # zu schräg / länglich — kein Ring
 
-        score = area * aspect  # größer + runder = besser
+        # Größtes Loch (Kind-Kontur) dieser Außenkontur suchen
+        hole_area = 0.0
+        child = hierarchy[i][2]
+        while child != -1:
+            hole_area = max(hole_area, cv2.contourArea(contours[child]))
+            child = hierarchy[child][0]  # nächstes Geschwister-Loch
+
+        # Ein echter Ring hat ein deutliches Loch (Loch/Gesamtfläche groß genug)
+        if hole_area / area < _MIN_HOLE_RATIO:
+            continue
+
+        # größer + runder + größeres Loch = besser
+        score = area * aspect * (hole_area / area)
         if score > best_score:
             best_score = score
             radius_px = (major_ax + minor_ax) / 4

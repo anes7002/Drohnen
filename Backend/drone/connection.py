@@ -70,7 +70,7 @@ class DroneConnection:
         if self.connected and self.socket:
             self.socket.sendto(command.encode("utf-8"), (self.ip_address, self.DRONE_PORT))
 
-    def send_command_with_response(self, command: str) -> str:
+    def send_command_with_response(self, command: str, timeout=None) -> str:
         """
         Sendet einen Befehl und wartet auf die Antwort der Drohne ("ok" / "error").
         Leert den Puffer vorher, um veraltete Antworten zu ignorieren.
@@ -85,16 +85,12 @@ class DroneConnection:
                     self.socket.recvfrom(1024)
             except Exception:
                 pass
-            self.socket.settimeout(self.CONNECTION_TIMEOUT)
+            self.socket.settimeout(timeout if timeout is not None else self.CONNECTION_TIMEOUT)
 
             self.socket.sendto(command.encode("utf-8"), (self.ip_address, self.DRONE_PORT))
 
-            # Telemetrie-Pakete (enthalten ":") überspringen, echte Antwort abwarten
-            while True:
-                response, _ = self.socket.recvfrom(1024)
-                decoded = response.decode("utf-8").strip()
-                if ":" not in decoded and decoded:
-                    return decoded
+            response, _ = self.socket.recvfrom(1024)
+            return response.decode("utf-8").strip()
         except Exception as e:
             print(f"[ERROR] Befehl '{command}' fehlgeschlagen: {e}")
             return "N/A"
