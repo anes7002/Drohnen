@@ -17,6 +17,7 @@ os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "8")
 import cv2
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 try:
     import psycopg2
@@ -39,6 +40,7 @@ app = FastAPI(title="Drohnen-Backend")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -588,7 +590,7 @@ def get_drohnen():
         print(f"[ERROR] get_drohnen: {e}")
         return {"success": False, "error": "Datenbankfehler"}
 
-
+# d
 @app.post("/drohnen")
 def add_drohne(data: dict):
     if not DB_AVAILABLE:
@@ -613,7 +615,6 @@ def add_drohne(data: dict):
     except Exception as e:
         print(f"[ERROR] add_drohne: {e}")
         return {"success": False, "error": "Datenbankfehler"}
-
 
 @app.delete("/drohnen/{drohnen_id}")
 def delete_drohne(drohnen_id: int):
@@ -782,6 +783,14 @@ async def stop_recording():
     current_recording_filename = None
     return {"success": True, "message": "Aufnahme gestoppt"}
 
+@app.get("/recordings/status")
+async def get_recording_status():
+    global is_recording
+    return {
+        "success": True, 
+        "isRecording": is_recording
+    }
+
 
 @app.get("/recordings")
 async def get_recordings():
@@ -799,6 +808,42 @@ async def get_recordings():
         return {"success": True, "data": data}
     except Exception as e:
         return {"success": False, "error": str(e)}
+    
+@app.post("/recordings/save")
+async def save_recording(data:dict):
+    filename = data.get("filename")
+    if not filename:
+        return {"success": False, "error": "Dateiname erforderlich"}
+    filepath = os.path.join(RECORDINGS_DIR, filename)
+    if not os.path.exists(filepath):
+        return {"success": False, "error": "Datei nicht gefunden"}
+    db_cursor().execute(
+        "INSERT INTO recordings (filename, created_at) VALUES (%s, %s)",
+        (filename, datetime.now())
+    )
+    return {"success": True, "message": "Aufnahme gespeichert"}
+    
+
+
+@app.get("/recordings/{rec_id}/video")
+async def serve_recording_video(rec_id: int):
+    if DB_AVAILABLE:
+        try:
+            with db_cursor() as cur:
+                cur.execute("SELECT filename FROM recordings WHERE id = %s", (rec_id,))
+                row = cur.fetchone()
+                if row:
+                    filepath = os.path.join(RECORDINGS_DIR, row[0])
+                    if os.path.exists(filepath):
+                        return FileResponse(filepath, media_type="video/mp4")
+        except Exception:
+            pass
+    # Fallback: search by index in filesystem
+    files = sorted([f for f in os.listdir(RECORDINGS_DIR) if f.endswith(".mp4")])
+    if 0 <= rec_id < len(files):
+        filepath = os.path.join(RECORDINGS_DIR, files[rec_id])
+        return FileResponse(filepath, media_type="video/mp4")
+    return {"success": False, "error": "Nicht gefunden"}
 
 
 @app.delete("/recordings/{rec_id}")
