@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import cv2
 import numpy as np
 
@@ -25,10 +27,20 @@ _red_upper2 = np.array([180, 255, 255], dtype=np.uint8)
 _single_lower: np.ndarray | None = None
 _single_upper: np.ndarray | None = None
 
-_SCALE: float = 0.4        # Resize-Faktor für schnellere Verarbeitung
-_MIN_AREA: int = 600        # Min. Konturenfläche auf dem skalierten Frame
+_SCALE: float = 0.5        # Resize-Faktor: 0.5 = mehr Genauigkeit beim Zielpunkt, noch schnell
+_MIN_AREA: int = 500        # Min. Konturenfläche auf dem skalierten Frame
 _MIN_ASPECT: float = 0.35   # Min. Ellipsen-Aspektverhältnis — schräg angeflogene Ringe erlauben
 _MIN_HOLE_RATIO: float = 0.04  # Loch muss mind. 4 % der Gesamtfläche sein (Ring hat Loch)
+# Loch-Mitte darf höchstens so weit (× Außen-Durchmesser) von der Außenmitte
+# abweichen — sonst ist es kein sauberer Ring, sondern ein Fleck mit Kerbe.
+_MAX_CENTER_OFFSET: float = 0.30
+# Fallback (Ring mit unterbrochenem Band): innere Ellipse muss LEER sein, und
+# das Rot muss RUND um die Mitte herumgehen (Winkelabdeckung) — so wird ein
+# echter (auch lückenhafter) Ring von einem bloßen roten Bogen unterschieden.
+_INNER_FRAC: float = 0.45
+_MAX_INNER_FILL: float = 0.35
+_N_ANGLES: int = 36                 # Anzahl Abtastwinkel rund um die Mitte
+_MIN_ANGULAR_COVERAGE: float = 0.6  # mind. 60 % der Winkel müssen Rot zeigen
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -127,7 +139,7 @@ def detect(frame) -> tuple | None:
             continue
 
         ellipse = cv2.fitEllipse(cnt)
-        (cx, cy), (minor_ax, major_ax), _ = ellipse
+        (ex, ey), (minor_ax, major_ax), _ = ellipse  # ex,ey = Mitte des Außenrings
         if major_ax == 0:
             continue
 
@@ -135,23 +147,103 @@ def detect(frame) -> tuple | None:
         if aspect < _MIN_ASPECT:
             continue  # zu schräg / länglich — kein Ring
 
-        # Größtes Loch (Kind-Kontur) dieser Außenkontur suchen
+        # Größtes Loch (Kind-Kontur) als KONTUR suchen — wir brauchen seinen Schwerpunkt
+        hole = None
         hole_area = 0.0
         child = hierarchy[i][2]
         while child != -1:
-            hole_area = max(hole_area, cv2.contourArea(contours[child]))
+            ca = cv2.contourArea(contours[child])
+            if ca > hole_area:
+                hole_area = ca
+                hole = contours[child]
             child = hierarchy[child][0]  # nächstes Geschwister-Loch
 
         # Ein echter Ring hat ein deutliches Loch (Loch/Gesamtfläche groß genug)
-        if hole_area / area < _MIN_HOLE_RATIO:
+        if hole is None or hole_area / area < _MIN_HOLE_RATIO:
             continue
 
-        # größer + runder + größeres Loch = besser
-        score = area * aspect * (hole_area / area)
+        # Schwerpunkt des LOCHS = exakt der Punkt, durch den geflogen werden soll.
+        # Bei schräg gesehenen/teilweise gestörten Ringen genauer als die Außenmitte.
+        m = cv2.moments(hole)
+        if m["m00"] == 0:
+            continue
+        hole_cx = m["m10"] / m["m00"]
+        hole_cy = m["m01"] / m["m00"]
+
+        # Konzentrizität: Loch-Mitte muss nah an der Außenmitte liegen, sonst ist
+        # es kein sauberer Ring (z. B. roter Fleck mit zufälliger Einbuchtung).
+        center_off = ((hole_cx - ex) ** 2 + (hole_cy - ey) ** 2) ** 0.5
+        max_off = _MAX_CENTER_OFFSET * major_ax
+        if center_off > max_off:
+            continue
+
+        # Bewertung: groß + rund + großes Loch + gut zentriert
+        concentric = 1.0 - center_off / max_off          # 1.0 = perfekt mittig
+        score = area * aspect * (hole_area / area) * (0.5 + 0.5 * concentric)
         if score > best_score:
             best_score = score
             radius_px = (major_ax + minor_ax) / 4
-            best = (cx / _SCALE, cy / _SCALE, radius_px / _SCALE)
+            # Zielpunkt = Loch-Mitte, Radius = Außenring (für Distanz-Schätzung)
+            best = (hole_cx / _SCALE, hole_cy / _SCALE, radius_px / _SCALE)
+
+    if best is not None:
+        return best
+
+    # ── Fallback: Ring mit unterbrochenem Band ──────────────────────────────
+    # Bei Paketverlust kann das rote Band Lücken haben → das Loch ist nicht mehr
+    # topologisch umschlossen, die obige Methode findet nichts. Hier prüfen wir
+    # stattdessen: ist die MITTE eines roten, runden Objekts leer? Dann Ring.
+    fallback_score = 0.0
+    for i, cnt in enumerate(contours):
+        if hierarchy[i][3] != -1:
+            continue
+        area = cv2.contourArea(cnt)
+        if area < _MIN_AREA or len(cnt) < 5:
+            continue
+        (ex, ey), (minor_ax, major_ax), angle = cv2.fitEllipse(cnt)
+        if major_ax == 0:
+            continue
+        aspect = minor_ax / major_ax
+        if aspect < _MIN_ASPECT:
+            continue
+
+        # 1) Mitte muss LEER sein (sonst solider Fleck/Quadrat).
+        inner = np.zeros(mask.shape, dtype=np.uint8)
+        cv2.ellipse(
+            inner,
+            ((ex, ey), (minor_ax * _INNER_FRAC, major_ax * _INNER_FRAC), angle),
+            255, -1,
+        )
+        inner_total = cv2.countNonZero(inner)
+        if inner_total == 0:
+            continue
+        inner_fill = cv2.countNonZero(cv2.bitwise_and(mask, inner)) / inner_total
+        if inner_fill > _MAX_INNER_FILL:
+            continue
+
+        # 2) Rot muss RUND um die Mitte herumgehen — Winkelabdeckung messen.
+        #    Pro Winkel an mehreren Radien abtasten (Band-Dicke unbekannt).
+        mh, mw = mask.shape
+        mean_r = (major_ax + minor_ax) / 4.0
+        covered = 0
+        for k in range(_N_ANGLES):
+            th = 2.0 * math.pi * k / _N_ANGLES
+            ct, st = math.cos(th), math.sin(th)
+            for rf in (0.6, 0.78, 0.95):
+                px = int(ex + mean_r * rf * ct)
+                py = int(ey + mean_r * rf * st)
+                if 0 <= px < mw and 0 <= py < mh and mask[py, px]:
+                    covered += 1
+                    break
+        coverage = covered / _N_ANGLES
+        if coverage < _MIN_ANGULAR_COVERAGE:
+            continue  # roter Bogen / Fragment, kein geschlossener Ring
+
+        score = area * aspect * (1.0 - inner_fill) * coverage
+        if score > fallback_score:
+            fallback_score = score
+            radius_px = (major_ax + minor_ax) / 4
+            best = (ex / _SCALE, ey / _SCALE, radius_px / _SCALE)
 
     return best
 
@@ -161,18 +253,22 @@ def detect(frame) -> tuple | None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def draw(frame, ring_data: tuple | None) -> None:
-    """Zeichnet Ring-Overlay direkt in den Frame (in-place)."""
+    """Zeichnet Ring-Overlay direkt in den Frame (in-place).
+
+    Der grüne Fadenkreuz-Punkt markiert die LOCH-MITTE — exakt den Punkt,
+    durch den die Drohne fliegt.
+    """
     if ring_data is None:
         return
     cx, cy, radius = int(ring_data[0]), int(ring_data[1]), int(ring_data[2])
-    red    = (0, 0, 220)
-    yellow = (0, 255, 255)
-    cv2.circle(frame, (cx, cy), radius, red, 3)
-    cv2.circle(frame, (cx, cy), 5, yellow, -1)
-    cv2.line(frame, (cx - 15, cy), (cx + 15, cy), yellow, 2)
-    cv2.line(frame, (cx, cy - 15), (cx, cy + 15), yellow, 2)
+    red   = (0, 0, 220)
+    green = (0, 255, 0)
+    cv2.circle(frame, (cx, cy), radius, red, 3)          # Außenring
+    cv2.circle(frame, (cx, cy), 7, green, -1)            # Zielpunkt (Loch-Mitte)
+    cv2.line(frame, (cx - 22, cy), (cx + 22, cy), green, 2)
+    cv2.line(frame, (cx, cy - 22), (cx, cy + 22), green, 2)
     cv2.putText(
-        frame, f"Ring r={radius:.0f}px",
+        frame, f"Ziel r={radius:.0f}px",
         (cx - 50, max(cy - radius - 10, 15)),
         cv2.FONT_HERSHEY_SIMPLEX, 0.55, red, 2, cv2.LINE_AA,
     )

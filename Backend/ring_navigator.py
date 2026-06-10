@@ -34,7 +34,12 @@ class RingNavigator:
     # ── Tunable parameters ────────────────────────────────────────────────────
     KP_LATERAL: float = 0.25     # proportional gain: lateral (left/right) correction
     KP_VERTICAL: float = 0.25    # proportional gain: vertical (up/down) correction
-    ALIGN_THRESH: int = 60       # pixel error below which the ring is "centered"
+    ALIGN_THRESH: int = 60       # pixel error below which the ring is "centered" (vertikal)
+    # Seitlich STRENGER als vertikal: Links/rechts-Treffgenauigkeit ist für den
+    # Durchflug am kritischsten. Erst wenn der Ring lateral so genau anvisiert UND
+    # ausgeschwungen ist, wird durchgeflogen.
+    ALIGN_THRESH_X: int = 32     # px: max. seitlicher Fehler für den Durchflug
+    SETTLE_DELTA: int = 14       # px/Tick: max. seitliche Bildbewegung = "ausgeschwungen"
     # Die Tello-Frontkamera ist ~10° nach UNTEN geneigt. Ring in der Bildmitte
     # bedeutet daher: Drohne hängt ÜBER dem Ring → sie fliegt oben drüber.
     # Der vertikale Zielpunkt muss deshalb ÜBER der Bildmitte liegen
@@ -51,11 +56,11 @@ class RingNavigator:
     FORWARD_MIN: int = 20        # min forward speed when nearly at the ring
     SEARCH_YAW: int = 25         # yaw speed while searching
     PASS_SPEED: int = 40         # forward speed while passing through
-    PASS_DURATION: float = 2.5   # seconds to fly forward through the ring
+    PASS_DURATION: float = 2.0   # seconds to fly forward through the ring (kürzer = weniger Drift)
     # Anti-Stehenbleiben: Ist der Ring nah (>= APPROACH_RADIUS), darf maximal so
     # lange nachzentriert werden — danach wird der Durchflug erzwungen. Sonst
     # hängt die Drohne bei leichtem Zittern ewig vor dem Ring.
-    NEAR_COMMIT_TIMEOUT: float = 1.2
+    NEAR_COMMIT_TIMEOUT: float = 1.6
     # Glättung der Ringposition: Einzelbild-Detektionen zittern (Rauschen,
     # H.264-Artefakte). Ein exponentieller Filter + Ausreißer-Verwurf macht
     # die Regelung ruhig und das Anvisieren der Ringmitte präzise.
@@ -81,6 +86,7 @@ class RingNavigator:
         self._smoothed: tuple | None = None   # Geglättete Ringposition (EMA)
         self._outlier_count: int = 0     # Verworfene Ausreißer in Folge
         self._near_since: float | None = None  # Seit wann der Ring "nah" ist (Anti-Stall)
+        self._prev_err_x: float | None = None  # Seitenfehler im Vortakt (für "ausgeschwungen")
 
         # Public status dict — read by the /ring/status endpoint.
         # Written by the background thread; read by the async event loop.
@@ -212,6 +218,7 @@ class RingNavigator:
         self._smoothed = None
         self._outlier_count = 0
         self._near_since = None
+        self._prev_err_x = None
 
     def _errors(self, ring: tuple) -> tuple[float, float]:
         """
@@ -289,7 +296,8 @@ class RingNavigator:
             a = self._clamp(err_x * self.KP_LATERAL, -40, 40)
             c = self._clamp(-err_y * self.KP_VERTICAL, -40, 40)  # invert: ring below → fly down
 
-            if abs(err_x) < self.ALIGN_THRESH and abs(err_y) < self.ALIGN_THRESH:
+            # Seitlich STRENG zentrieren, bevor angeflogen wird.
+            if abs(err_x) < self.ALIGN_THRESH_X and abs(err_y) < self.ALIGN_THRESH:
                 self.state = RingState.APPROACHING
 
             return (a, 0, c, 0)
@@ -309,10 +317,11 @@ class RingNavigator:
             err_x, err_y = self._errors(ring)
             centering_error = max(abs(err_x), abs(err_y))
 
-            # Zu weit daneben → zurück zum reinen Ausrichten. Vertikal enger als
-            # horizontal, damit die Drohne NICHT über/unter den Ring fliegt.
-            if abs(err_x) > self.ALIGN_THRESH * 2.5 or abs(err_y) > self.ALIGN_THRESH * 1.5:
+            # Seitlich/vertikal zu weit daneben → zurück zum reinen Ausrichten.
+            if abs(err_x) > self.ALIGN_THRESH_X * 3 or abs(err_y) > self.ALIGN_THRESH * 1.5:
                 self._last_forward = 0
+                self._near_since = None
+                self._prev_err_x = None
                 self.state = RingState.ALIGNING
                 return (0, 0, 0, 0)
 
@@ -323,9 +332,27 @@ class RingNavigator:
             if radius >= self.APPROACH_RADIUS:
                 if self._near_since is None:
                     self._near_since = time.time()
+                a = self._clamp(err_x * self.KP_LATERAL, -35, 35)
+                c = self._clamp(-err_y * self.KP_VERTICAL, -35, 35)
+
+                # "Ausgeschwungen": Seitenfehler klein UND ändert sich kaum (keine
+                # seitliche Restgeschwindigkeit). Nur dann geht der Blindflug gerade
+                # durch die Mitte statt seitlich vorbei.
+                settled_x = (
+                    self._prev_err_x is not None
+                    and abs(err_x - self._prev_err_x) <= self.SETTLE_DELTA
+                )
+                self._prev_err_x = err_x
+                centered = (
+                    abs(err_x) <= self.ALIGN_THRESH_X
+                    and abs(err_y) <= self.ALIGN_THRESH
+                    and settled_x
+                )
+                # Erzwungener Durchflug nur als Sicherung (Ring rutscht aus dem Bild
+                # oder Anti-Stall-Timeout), sonst exakt zentriert durchfliegen.
                 commit = (
-                    centering_error <= self.ALIGN_THRESH * 1.2
-                    or radius >= self.APPROACH_RADIUS * 1.3
+                    centered
+                    or radius >= self.APPROACH_RADIUS * 1.6
                     or time.time() - self._near_since > self.NEAR_COMMIT_TIMEOUT
                 )
                 if commit:
@@ -333,12 +360,12 @@ class RingNavigator:
                     self._pass_start = time.time()
                     self._reset_tracking()
                     return (0, self.PASS_SPEED, 0, 0)
-                # Kurz nachzentrieren — aber langsam WEITER vorwärts, nie stehen
-                a = self._clamp(err_x * self.KP_LATERAL, -35, 35)
-                c = self._clamp(-err_y * self.KP_VERTICAL, -35, 35)
-                self._last_forward = 10
-                return (a, 10, c, 0)
+                # Noch nicht exakt mittig → AUF DER STELLE zentrieren (KEIN Vorwärts!),
+                # damit keine seitliche Drift entsteht und sie nicht vorbeifliegt.
+                self._last_forward = 0
+                return (a, 0, c, 0)
             self._near_since = None
+            self._prev_err_x = None
 
             # Zentrieren mit VOLLER Verstärkung — das Loch exakt anvisieren.
             a = self._clamp(err_x * self.KP_LATERAL, -35, 35)
