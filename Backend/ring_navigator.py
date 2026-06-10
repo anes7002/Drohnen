@@ -35,6 +35,15 @@ class RingNavigator:
     KP_LATERAL: float = 0.25     # proportional gain: lateral (left/right) correction
     KP_VERTICAL: float = 0.25    # proportional gain: vertical (up/down) correction
     ALIGN_THRESH: int = 60       # pixel error below which the ring is "centered"
+    # Die Tello-Frontkamera ist ~10° nach UNTEN geneigt. Ring in der Bildmitte
+    # bedeutet daher: Drohne hängt ÜBER dem Ring → sie fliegt oben drüber.
+    # Der vertikale Zielpunkt muss deshalb ÜBER der Bildmitte liegen
+    # (≈ f·tan(10°) ≈ 110 px bei 960×720).
+    TARGET_OFFSET_Y: int = 100   # px: Ring wird so weit ÜBER der Bildmitte gehalten
+    # Beim Vorwärtsflug nickt die Drohne nach vorn → Kamera zeigt noch weiter
+    # nach unten → Ring wandert im Bild nach oben → Regler würde steigen.
+    # Ausgleich: Zielpunkt pro Einheit Vorwärtsgeschwindigkeit weiter anheben.
+    PITCH_COMP: float = 0.5      # px Ziel-Anhebung pro Einheit Vorwärts-Speed
     LOST_TOLERANCE: int = 8      # Frames (~0.8 s), die ein verlorener Ring überbrückt wird
     APPROACH_RADIUS: int = 90    # ring radius (px) at which we switch to PASSING
     COMMIT_FACTOR: float = 0.6   # Ring nah verloren (>= 60 % vom Pass-Radius) → blind durch
@@ -59,6 +68,7 @@ class RingNavigator:
         self._detection_streak: int = 0  # Wie viele Frames der Ring schon stabil sichtbar ist
         self._lost_count: int = 0        # Wie viele Frames der Ring in Folge fehlt
         self._last_ring: tuple | None = None  # Letzte bekannte Ring-Position (zum Überbrücken)
+        self._last_forward: int = 0      # Zuletzt gesendeter Vorwärts-Speed (für Nick-Ausgleich)
 
         # Public status dict — read by the /ring/status endpoint.
         # Written by the background thread; read by the async event loop.
@@ -150,13 +160,30 @@ class RingNavigator:
         self._detection_streak = 0
         self._lost_count = 0
         self._last_ring = None
+        self._last_forward = 0
+
+    def _errors(self, ring: tuple) -> tuple[float, float]:
+        """
+        Pixel-Fehler zum ZIELPUNKT (nicht zur Bildmitte!).
+
+        Vertikal liegt der Zielpunkt TARGET_OFFSET_Y über der Bildmitte
+        (Kamera-Neigung) plus Nick-Ausgleich beim Vorwärtsflug. Nur so endet
+        die Drohne auf Ring-Höhe statt darüber.
+        """
+        cx, cy, _ = ring
+        target_y = (
+            self.fh // 2
+            - self.TARGET_OFFSET_Y
+            - self.PITCH_COMP * self._last_forward
+        )
+        err_x = cx - self.fw // 2   # positiv = Ring rechts vom Ziel
+        err_y = cy - target_y       # positiv = Ring unter dem Ziel → sinken
+        return err_x, err_y
 
     def _step(self, ring: tuple | None) -> tuple:
-        cx_frame = self.fw // 2
-        cy_frame = self.fh // 2
-
         # ── SEARCHING ────────────────────────────────────────────────────────
         if self.state == RingState.SEARCHING:
+            self._last_forward = 0
             if ring is None:
                 self._detection_streak = 0
                 return (0, 0, 0, self.SEARCH_YAW)  # Drehen bis Ring gefunden
@@ -186,11 +213,12 @@ class RingNavigator:
             self._lost_count += 1
             if self._lost_count > self.LOST_TOLERANCE:
                 # Ring wirklich weg → von vorne suchen
-                self._last_ring = None
+                self._reset_tracking()
                 self.state = RingState.SEARCHING
                 return (0, 0, 0, self.SEARCH_YAW)
             ring = self._last_ring  # weiter mit letzter bekannter Position
             if ring is None:
+                self._reset_tracking()
                 self.state = RingState.SEARCHING
                 return (0, 0, 0, self.SEARCH_YAW)
         else:
@@ -199,9 +227,8 @@ class RingNavigator:
 
         # ── ALIGNING ─────────────────────────────────────────────────────────
         if self.state == RingState.ALIGNING:
-            cx, cy, _radius = ring
-            err_x = cx - cx_frame   # positive = ring is right of center
-            err_y = cy - cy_frame   # positive = ring is below center (image coords)
+            self._last_forward = 0
+            err_x, err_y = self._errors(ring)
 
             # Reine Zentrierung — NICHT vorwärts (sonst driftet sie beim Ausrichten weg)
             a = self._clamp(err_x * self.KP_LATERAL, -40, 40)
@@ -214,7 +241,7 @@ class RingNavigator:
 
         # ── APPROACHING ───────────────────────────────────────────────────────
         if self.state == RingState.APPROACHING:
-            cx, cy, radius = ring
+            radius = ring[2]
 
             # Ring beim Heranfliegen verloren, aber wir waren schon nah dran →
             # er füllt das Bild / ist aus dem Sichtfeld gerutscht → blind durchfliegen.
@@ -224,21 +251,30 @@ class RingNavigator:
                 self._reset_tracking()
                 return (0, self.PASS_SPEED, 0, 0)
 
-            err_x = cx - cx_frame
-            err_y = cy - cy_frame
+            err_x, err_y = self._errors(ring)
+            centering_error = max(abs(err_x), abs(err_y))
 
             # Zu weit daneben → zurück zum reinen Ausrichten. Vertikal enger als
             # horizontal, damit die Drohne NICHT über/unter den Ring fliegt.
             if abs(err_x) > self.ALIGN_THRESH * 2.5 or abs(err_y) > self.ALIGN_THRESH * 1.5:
+                self._last_forward = 0
                 self.state = RingState.ALIGNING
                 return (0, 0, 0, 0)
 
-            # Ring groß genug → Durchflug
+            # Ring groß genug → Durchflug, aber NUR wenn die Mitte gerade sauber
+            # anvisiert ist. Sonst auf der Stelle weiter zentrieren — außer der
+            # Ring wird so groß, dass er gleich aus dem Bild rutscht (Notfall-
+            # Commit), dann lieber durch als blind hängen bleiben.
             if radius >= self.APPROACH_RADIUS:
-                self.state = RingState.PASSING
-                self._pass_start = time.time()
-                self._reset_tracking()
-                return (0, self.PASS_SPEED, 0, 0)
+                if centering_error <= self.ALIGN_THRESH or radius >= self.APPROACH_RADIUS * 1.3:
+                    self.state = RingState.PASSING
+                    self._pass_start = time.time()
+                    self._reset_tracking()
+                    return (0, self.PASS_SPEED, 0, 0)
+                a = self._clamp(err_x * self.KP_LATERAL, -35, 35)
+                c = self._clamp(-err_y * self.KP_VERTICAL, -35, 35)
+                self._last_forward = 0
+                return (a, 0, c, 0)
 
             # Zentrieren mit VOLLER Verstärkung — das Loch exakt anvisieren.
             a = self._clamp(err_x * self.KP_LATERAL, -35, 35)
@@ -246,13 +282,13 @@ class RingNavigator:
 
             # Nur vorwärts, wenn zentriert; je weiter von der Mitte weg, desto
             # langsamer. So fliegt die Drohne durch die MITTE statt über den Ring.
-            centering_error = max(abs(err_x), abs(err_y))
             if centering_error > self.ALIGN_THRESH:
                 forward = 0  # erst sauber auf die Mitte zentrieren
             else:
                 progress = radius / self.APPROACH_RADIUS  # 0 fern → 1 nah
                 forward = int(self.FORWARD_MAX - progress * (self.FORWARD_MAX - self.FORWARD_MIN))
                 forward = int(forward * (1.0 - centering_error / self.ALIGN_THRESH))
+            self._last_forward = forward
             return (a, forward, c, 0)
 
         return (0, 0, 0, 0)

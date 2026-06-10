@@ -498,6 +498,10 @@ async def ring_config(data: dict):
             ring_navigator.FORWARD_MAX = int(data["forward_max"])
         if "pass_speed" in data:
             ring_navigator.PASS_SPEED = int(data["pass_speed"])
+        if "target_offset_y" in data:
+            ring_navigator.TARGET_OFFSET_Y = int(data["target_offset_y"])
+        if "pitch_comp" in data:
+            ring_navigator.PITCH_COMP = float(data["pitch_comp"])
     return {"success": True}
 
 

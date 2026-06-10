@@ -443,7 +443,7 @@ class _DroneDashboardState extends State<DroneDashboard> {
   void _showFlightCoursesDialog() {
     showDialog(
       context: context,
-      builder: (context) => FlugkurseDialog(
+      builder: (context) => FlugkurseDialog( 
         backendHost: backendHost,
         isConnected: isConnected,
         onExecuteBuiltIn: _executeCourse,
