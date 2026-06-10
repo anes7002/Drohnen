@@ -504,7 +504,7 @@ def get_drohnen():
         print(f"[ERROR] get_drohnen: {e}")
         return {"success": False, "error": "Datenbankfehler"}
 
-
+# d
 @app.post("/drohnen")
 def add_drohne(data: dict):
     if not DB_AVAILABLE:
@@ -529,7 +529,6 @@ def add_drohne(data: dict):
     except Exception as e:
         print(f"[ERROR] add_drohne: {e}")
         return {"success": False, "error": "Datenbankfehler"}
-
 
 @app.delete("/drohnen/{drohnen_id}")
 def delete_drohne(drohnen_id: int):
@@ -698,6 +697,14 @@ async def stop_recording():
     current_recording_filename = None
     return {"success": True, "message": "Aufnahme gestoppt"}
 
+@app.get("/recordings/status")
+async def get_recording_status():
+    global is_recording
+    return {
+        "success": True, 
+        "isRecording": is_recording
+    }
+
 
 @app.get("/recordings")
 async def get_recordings():
@@ -715,6 +722,21 @@ async def get_recordings():
         return {"success": True, "data": data}
     except Exception as e:
         return {"success": False, "error": str(e)}
+    
+@app.post("/recordings/save")
+async def save_recording(data:dict):
+    filename = data.get("filename")
+    if not filename:
+        return {"success": False, "error": "Dateiname erforderlich"}
+    filepath = os.path.join(RECORDINGS_DIR, filename)
+    if not os.path.exists(filepath):
+        return {"success": False, "error": "Datei nicht gefunden"}
+    db_cursor().execute(
+        "INSERT INTO recordings (filename, created_at) VALUES (%s, %s)",
+        (filename, datetime.now())
+    )
+    return {"success": True, "message": "Aufnahme gespeichert"}
+    
 
 
 @app.get("/recordings/{rec_id}/video")

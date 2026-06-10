@@ -41,6 +41,7 @@ class _VideoDialogState extends State<VideoDialog> {
   void initState() {
     super.initState();
     _loadRecordings();
+    _checkRecordingStatus(); // Fragt den aktuellen Status beim Öffnen ab
     _connectLiveVideo();
   }
 
@@ -60,6 +61,33 @@ class _VideoDialogState extends State<VideoDialog> {
         _frameNotifier.value = Uint8List.fromList(message);
       }
     });
+  }
+
+  Future<void> _checkRecordingStatus() async {
+    try {
+      final res = await http.get(
+        Uri.parse('http://${widget.backendHost}/recordings/status'),
+      );
+      final data = jsonDecode(res.body);
+      if (data['success'] == true && data['isRecording'] != null) {
+        setState(() {
+          _isRecording = data['isRecording'];
+        });
+      }
+    } catch (_) {
+      // Fehler ignorieren, Status wird auf false gelassen
+    }
+  }
+
+  Future<void> saveRecording() async {
+    try {
+      final res = await http.post(
+        Uri.parse('http://${widget.backendHost}/recordings/save')
+      );
+      if (jsonDecode(res.body)['success'] == true) {
+        _loadRecordings();
+      }
+    } catch (_) {}
   }
 
   Future<void> _loadRecordings() async {
