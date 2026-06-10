@@ -1,4 +1,3 @@
-import socket
 import time
 
 class StatusLED:
@@ -6,20 +5,6 @@ class StatusLED:
         self.connection = connection
         self.ip = ip
         self.port = 8889
-
-    def _send_raw_command(self, cmd):
-        # Wenn die Drohne noch nicht offiziell via connection.connect() verbunden ist
-        # (oder fehlgeschlagen ist), schicken wir ein raw UDP Paket an die IP.
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            # Tello muss im SDK-Modus sein, um ext Befehle zu empfangen
-            sock.sendto(b"command", (self.ip, self.port))
-            # Kurzer Delay, damit 'command' verarbeitet weden kann bevor 'ext led' kommt
-            time.sleep(0.1)
-            sock.sendto(cmd.encode("utf-8"), (self.ip, self.port))
-            sock.close()
-        except Exception as e:
-            print(f"[LED] Fehler beim Senden des Raw-Befehls: {e}")
 
     def connecting(self):
         print("[LED] Verbindung wird aufgebaut (Blau)")
@@ -34,11 +19,10 @@ class StatusLED:
         self.set_color(255, 0, 0)
 
     def set_color(self, r, g, b):
-        cmd = f"ext led {r} {g} {b}"
-        if self.connection and self.connection.connected:
-            self.connection.send_command(cmd)
-        else:
-            self._send_raw_command(cmd)
+        # Tello EDU ohne Erweiterungsmodul kennt keine "ext led"-Befehle
+        # (Antwort: "unknown command: ext"). LED-Steuerung daher deaktiviert,
+        # damit der Verbindungs-Handshake nicht gestört wird.
+        pass
 
     def off(self):
         self.set_color(0, 0, 0)

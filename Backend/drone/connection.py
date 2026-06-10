@@ -35,8 +35,24 @@ class DroneConnection:
                     break
                 time.sleep(0.1)
 
+    def _close_sockets(self):
+        """Schließt offene Sockets, damit Port 8890 für einen neuen Versuch frei wird."""
+        for sock_attr in ("socket", "state_socket"):
+            sock = getattr(self, sock_attr)
+            if sock:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+                setattr(self, sock_attr, None)
+
     def connect(self, ip_address: str) -> bool:
         try:
+            # Reste eines vorherigen (fehlgeschlagenen) Versuchs aufräumen,
+            # sonst schlägt das erneute Binden von Port 8890 fehl.
+            self.connected = False
+            self._close_sockets()
+
             self.ip_address = ip_address
             print(f"[INFO] Verbinde mit Drohne {ip_address}:{self.DRONE_PORT}")
 
@@ -46,23 +62,34 @@ class DroneConnection:
             self.state_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.state_socket.bind(("", self.STATE_PORT))
 
-            self.socket.sendto(b"command", (ip_address, self.DRONE_PORT))
-            response, _ = self.socket.recvfrom(1024)
+            for attempt in range(1, 4):
+                self.socket.sendto(b"command", (ip_address, self.DRONE_PORT))
+                try:
+                    response, _ = self.socket.recvfrom(1024)
+                except socket.timeout:
+                    print(f"[WARN] Keine Antwort (Versuch {attempt}/3)")
+                    continue
 
-            if response.decode("utf-8").strip() == "ok":
-                print(f"[OK] Verbindung zu {ip_address} bestätigt")
-                self.connected = True
-                self.state_thread = threading.Thread(
-                    target=self._state_listener, daemon=True
-                )
-                self.state_thread.start()
-                return True
-            else:
-                print(f"[ERROR] Unerwartete Antwort: {response}")
-                return False
+                if response.decode("utf-8", errors="replace").strip() == "ok":
+                    print(f"[OK] Verbindung zu {ip_address} bestätigt")
+                    self.connected = True
+                    self.state_thread = threading.Thread(
+                        target=self._state_listener, daemon=True
+                    )
+                    self.state_thread.start()
+                    return True
+
+                # Veraltete/fremde Antwort (z.B. von einem früheren Befehl) –
+                # ignorieren und Handshake erneut versuchen.
+                print(f"[WARN] Unerwartete Antwort (Versuch {attempt}/3): {response}")
+
+            print("[ERROR] Verbindung fehlgeschlagen: keine gültige Antwort der Drohne")
+            self._close_sockets()
+            return False
         except Exception as e:
             print(f"[ERROR] Verbindung fehlgeschlagen: {e}")
             self.connected = False
+            self._close_sockets()
             return False
 
     def send_command(self, command: str):
@@ -97,7 +124,4 @@ class DroneConnection:
 
     def disconnect(self):
         self.connected = False
-        if self.socket:
-            self.socket.close()
-        if self.state_socket:
-            self.state_socket.close()
+        self._close_sockets()
