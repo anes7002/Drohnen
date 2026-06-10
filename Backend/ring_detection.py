@@ -26,9 +26,9 @@ _single_lower: np.ndarray | None = None
 _single_upper: np.ndarray | None = None
 
 _SCALE: float = 0.4        # Resize-Faktor für schnellere Verarbeitung
-_MIN_AREA: int = 800        # Min. Konturenfläche auf dem skalierten Frame
-_MIN_ASPECT: float = 0.45   # Min. Ellipsen-Aspektverhältnis — Ringe sind runder als Menschen
-_MIN_HOLE_RATIO: float = 0.10  # Loch muss mind. 10 % der Gesamtfläche sein (Ring hat Loch)
+_MIN_AREA: int = 600        # Min. Konturenfläche auf dem skalierten Frame
+_MIN_ASPECT: float = 0.35   # Min. Ellipsen-Aspektverhältnis — schräg angeflogene Ringe erlauben
+_MIN_HOLE_RATIO: float = 0.04  # Loch muss mind. 4 % der Gesamtfläche sein (Ring hat Loch)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -99,11 +99,13 @@ def detect(frame) -> tuple | None:
     hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
     mask = _build_mask(hsv)
 
-    # Nur Rauschen entfernen + dünne Lücken im Ring schließen — aber sanft,
-    # damit das große Loch in der Mitte erhalten bleibt.
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    # Rauschen entfernen, dann Lücken im Ringband kräftig schließen — nur ein
+    # GESCHLOSSENES Band umschließt das Loch, das der Hole-Check verlangt.
+    # Das große Loch in der Mitte ist viel größer als der Kernel und bleibt offen.
+    kernel_small = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_small)
+    kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close, iterations=2)
 
     contours, hierarchy = cv2.findContours(
         mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE

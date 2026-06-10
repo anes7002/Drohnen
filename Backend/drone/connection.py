@@ -1,3 +1,4 @@
+import select
 import socket
 import threading
 import time
@@ -6,7 +7,8 @@ import time
 class DroneConnection:
     DRONE_PORT = 8889
     STATE_PORT = 8890
-    CONNECTION_TIMEOUT = 10
+    CONNECTION_TIMEOUT = 10   # Antwort-Timeout für Befehle (z. B. land dauert lange)
+    HANDSHAKE_TIMEOUT = 3     # Timeout pro Verbindungsversuch — im LAN reicht das locker
 
     def __init__(self):
         self.ip_address = None
@@ -15,6 +17,10 @@ class DroneConnection:
         self.connected = False
         self.last_state = {}
         self.state_thread = None
+        # Serialisiert Befehl+Antwort-Operationen auf dem geteilten Socket.
+        # Ohne diesen Lock kollidieren parallele Befehle (z. B. mehrfaches
+        # Takeoff-Tippen) → "[WinError 10035] nicht blockierender Socketvorgang".
+        self._cmd_lock = threading.Lock()
 
     def _state_listener(self):
         """Hintergrund-Thread: empfängt Tello-Statusmeldungen auf Port 8890."""
@@ -57,7 +63,7 @@ class DroneConnection:
             print(f"[INFO] Verbinde mit Drohne {ip_address}:{self.DRONE_PORT}")
 
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.socket.settimeout(self.CONNECTION_TIMEOUT)
+            self.socket.settimeout(self.HANDSHAKE_TIMEOUT)
 
             self.state_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.state_socket.bind(("", self.STATE_PORT))
@@ -72,6 +78,7 @@ class DroneConnection:
 
                 if response.decode("utf-8", errors="replace").strip() == "ok":
                     print(f"[OK] Verbindung zu {ip_address} bestätigt")
+                    self.socket.settimeout(self.CONNECTION_TIMEOUT)
                     self.connected = True
                     self.state_thread = threading.Thread(
                         target=self._state_listener, daemon=True
@@ -100,27 +107,38 @@ class DroneConnection:
     def send_command_with_response(self, command: str, timeout=None) -> str:
         """
         Sendet einen Befehl und wartet auf die Antwort der Drohne ("ok" / "error").
-        Leert den Puffer vorher, um veraltete Antworten zu ignorieren.
+
+        Nutzt select() statt den Blockier-Modus des Sockets umzuschalten — so
+        kann es auch bei parallelen Aufrufen nicht mehr zu WinError 10035 kommen.
+        Der Lock serialisiert konkurrierende Befehle; fire-and-forget RC-Befehle
+        (send_command) bleiben absichtlich ungesperrt, damit der Ring-/RC-Takt
+        nicht hinter einem langen 'land' wartet.
         """
         if not (self.connected and self.socket):
             return "N/A"
-        try:
-            # Puffer leeren, damit keine alten Antworten störend eingelesen werden
-            self.socket.setblocking(False)
+        timeout = timeout if timeout is not None else self.CONNECTION_TIMEOUT
+        sock = self.socket
+        with self._cmd_lock:
             try:
-                while True:
-                    self.socket.recvfrom(1024)
-            except Exception:
-                pass
-            self.socket.settimeout(timeout if timeout is not None else self.CONNECTION_TIMEOUT)
+                # Veraltete Antworten verwerfen (ohne Moduswechsel des Sockets)
+                while select.select([sock], [], [], 0)[0]:
+                    try:
+                        sock.recvfrom(1024)
+                    except OSError:
+                        break
 
-            self.socket.sendto(command.encode("utf-8"), (self.ip_address, self.DRONE_PORT))
+                sock.sendto(command.encode("utf-8"), (self.ip_address, self.DRONE_PORT))
 
-            response, _ = self.socket.recvfrom(1024)
-            return response.decode("utf-8").strip()
-        except Exception as e:
-            print(f"[ERROR] Befehl '{command}' fehlgeschlagen: {e}")
-            return "N/A"
+                # Auf Antwort warten — select liefert das Timeout, recvfrom
+                # kehrt danach sofort zurück (kein Blockieren).
+                if select.select([sock], [], [], timeout)[0]:
+                    response, _ = sock.recvfrom(1024)
+                    return response.decode("utf-8", errors="replace").strip()
+                print(f"[WARN] Keine Antwort auf '{command}' (Timeout {timeout}s)")
+                return "N/A"
+            except Exception as e:
+                print(f"[ERROR] Befehl '{command}' fehlgeschlagen: {e}")
+                return "N/A"
 
     def disconnect(self):
         self.connected = False

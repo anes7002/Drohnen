@@ -8,22 +8,27 @@ class Control:
         """
         self.connection = connection
 
-    def takeoff(self):
+    def takeoff(self) -> bool:
         print("[INFO] Taking off...")
-        resp = self.connection.send_command_with_response("takeoff")
+        resp = self.connection.send_command_with_response("takeoff", timeout=15)
         print(f"[DEBUG] Takeoff response: {resp}")
-        
-        # Falls die Drohne den Start aus Hardware-/Sicherheitsgründen verweigert
-        if "error" in resp.lower():
-            try:
-                bat = self.connection.send_command_with_response("battery?")
-                temp = self.connection.send_command_with_response("temp?")
-                print(f"[WARNING] Start verweigert! Drohnen-Akku: {bat}%, Temperatur: {temp}°C")
-            except Exception:
-                pass
-        else:
-            # Nach dem Start direkt weiter nach oben fliegen (ca. 80cm höher)
-            print("[INFO] Steige nach Start noch etwas höher...")
+
+        if resp.strip().lower() == "ok":
+            print("[INFO] Start erfolgreich.")
+            return True
+
+        # Start verweigert ("error") ODER keine Antwort ("N/A") → Ursache prüfen.
+        # Häufigster Grund: zu heiß (>90 °C) oder Akku zu schwach.
+        try:
+            bat = self.connection.send_command_with_response("battery?", timeout=5)
+            temp = self.connection.send_command_with_response("temp?", timeout=5)
+            print(f"[WARNING] Start NICHT bestätigt (Antwort: {resp})! "
+                  f"Drohnen-Akku: {bat}%, Temperatur: {temp}")
+            print("[WARNING] Tello startet nicht bei Überhitzung (~90 °C+) "
+                  "oder niedrigem Akku. Abkühlen lassen / laden.")
+        except Exception:
+            pass
+        return False
 
     def land(self):
         print("[INFO] Landing...")

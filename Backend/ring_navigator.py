@@ -44,7 +44,7 @@ class RingNavigator:
     # nach unten → Ring wandert im Bild nach oben → Regler würde steigen.
     # Ausgleich: Zielpunkt pro Einheit Vorwärtsgeschwindigkeit weiter anheben.
     PITCH_COMP: float = 0.5      # px Ziel-Anhebung pro Einheit Vorwärts-Speed
-    LOST_TOLERANCE: int = 8      # Frames (~0.8 s), die ein verlorener Ring überbrückt wird
+    LOST_TOLERANCE: int = 16     # Regel-Ticks (~0.8 s bei 20 Hz), die ein verlorener Ring überbrückt wird
     APPROACH_RADIUS: int = 90    # ring radius (px) at which we switch to PASSING
     COMMIT_FACTOR: float = 0.6   # Ring nah verloren (>= 60 % vom Pass-Radius) → blind durch
     FORWARD_MAX: int = 40        # max forward speed during approach
@@ -52,6 +52,15 @@ class RingNavigator:
     SEARCH_YAW: int = 25         # yaw speed while searching
     PASS_SPEED: int = 40         # forward speed while passing through
     PASS_DURATION: float = 2.5   # seconds to fly forward through the ring
+    # Anti-Stehenbleiben: Ist der Ring nah (>= APPROACH_RADIUS), darf maximal so
+    # lange nachzentriert werden — danach wird der Durchflug erzwungen. Sonst
+    # hängt die Drohne bei leichtem Zittern ewig vor dem Ring.
+    NEAR_COMMIT_TIMEOUT: float = 1.2
+    # Glättung der Ringposition: Einzelbild-Detektionen zittern (Rauschen,
+    # H.264-Artefakte). Ein exponentieller Filter + Ausreißer-Verwurf macht
+    # die Regelung ruhig und das Anvisieren der Ringmitte präzise.
+    SMOOTH_ALPHA: float = 0.5    # Gewicht der NEUEN Messung (1.0 = keine Glättung)
+    JUMP_REJECT_PX: int = 220    # Positionssprung > x px = Ausreißer (max. 2 in Folge verwerfen)
     # ─────────────────────────────────────────────────────────────────────────
 
     def __init__(self, control, frame_width: int = 960, frame_height: int = 720):
@@ -69,6 +78,9 @@ class RingNavigator:
         self._lost_count: int = 0        # Wie viele Frames der Ring in Folge fehlt
         self._last_ring: tuple | None = None  # Letzte bekannte Ring-Position (zum Überbrücken)
         self._last_forward: int = 0      # Zuletzt gesendeter Vorwärts-Speed (für Nick-Ausgleich)
+        self._smoothed: tuple | None = None   # Geglättete Ringposition (EMA)
+        self._outlier_count: int = 0     # Verworfene Ausreißer in Folge
+        self._near_since: float | None = None  # Seit wann der Ring "nah" ist (Anti-Stall)
 
         # Public status dict — read by the /ring/status endpoint.
         # Written by the background thread; read by the async event loop.
@@ -102,7 +114,43 @@ class RingNavigator:
     def update_ring(self, ring_data: tuple | None) -> None:
         """Feed the latest detection result from the video pipeline."""
         with self._lock:
-            self._ring = ring_data
+            self._ring = self._smooth(ring_data)
+
+    def _smooth(self, ring: tuple | None) -> tuple | None:
+        """
+        Exponentielle Glättung der Ringposition + Ausreißer-Verwurf.
+
+        - Erste Messung (oder während der Suche): direkt übernehmen.
+        - Springt die Position um mehr als JUMP_REJECT_PX, wird die Messung
+          bis zu 2× verworfen (Fehl-Detektion). Bleibt der Sprung, ist es
+          eine echte Bewegung → neue Position übernehmen.
+        """
+        if ring is None:
+            self._outlier_count = 0
+            return None
+        if self._smoothed is None or self.state == RingState.SEARCHING:
+            self._smoothed = ring
+            self._outlier_count = 0
+            return self._smoothed
+
+        dx = ring[0] - self._smoothed[0]
+        dy = ring[1] - self._smoothed[1]
+        if (dx * dx + dy * dy) ** 0.5 > self.JUMP_REJECT_PX:
+            if self._outlier_count < 2:
+                self._outlier_count += 1
+                return self._smoothed  # Ausreißer ignorieren, alte Position halten
+            self._smoothed = ring      # Sprung ist echt → übernehmen
+            self._outlier_count = 0
+            return self._smoothed
+
+        self._outlier_count = 0
+        a = self.SMOOTH_ALPHA
+        self._smoothed = (
+            a * ring[0] + (1 - a) * self._smoothed[0],
+            a * ring[1] + (1 - a) * self._smoothed[1],
+            a * ring[2] + (1 - a) * self._smoothed[2],
+        )
+        return self._smoothed
 
     def get_status(self) -> dict:
         return dict(self.status)
@@ -144,7 +192,7 @@ class RingNavigator:
                 "radius": int(ring[2]) if ring else 0,
                 "rc": [a, b, c, d],
             }
-            time.sleep(0.1)
+            time.sleep(0.05)  # 20 Hz Regeltakt — schnellere Reaktion auf Abweichungen
 
         if self.control:
             self.control.send_rc(0, 0, 0, 0)
@@ -161,6 +209,9 @@ class RingNavigator:
         self._lost_count = 0
         self._last_ring = None
         self._last_forward = 0
+        self._smoothed = None
+        self._outlier_count = 0
+        self._near_since = None
 
     def _errors(self, ring: tuple) -> tuple[float, float]:
         """
@@ -185,11 +236,15 @@ class RingNavigator:
         if self.state == RingState.SEARCHING:
             self._last_forward = 0
             if ring is None:
-                self._detection_streak = 0
+                # Einzelner Aussetzer während der Bestätigung verwirft den
+                # Fortschritt nicht komplett — erst bei streak 0 weiterdrehen.
+                self._detection_streak = max(0, self._detection_streak - 1)
+                if self._detection_streak > 0:
+                    return (0, 0, 0, 0)  # kurz warten, Ring war gerade noch da
                 return (0, 0, 0, self.SEARCH_YAW)  # Drehen bis Ring gefunden
-            # Ring gesehen — erst nach 4 stabilen Frames (≈ 0.4 s) wechseln
+            # Ring gesehen — erst nach 6 stabilen Ticks (≈ 0.3 s bei 20 Hz) wechseln
             self._detection_streak += 1
-            if self._detection_streak >= 4:
+            if self._detection_streak >= 6:
                 self._detection_streak = 0
                 self._lost_count = 0
                 self._last_ring = ring
@@ -261,33 +316,44 @@ class RingNavigator:
                 self.state = RingState.ALIGNING
                 return (0, 0, 0, 0)
 
-            # Ring groß genug → Durchflug, aber NUR wenn die Mitte gerade sauber
-            # anvisiert ist. Sonst auf der Stelle weiter zentrieren — außer der
-            # Ring wird so groß, dass er gleich aus dem Bild rutscht (Notfall-
-            # Commit), dann lieber durch als blind hängen bleiben.
+            # Ring groß genug → Durchflug, sobald die Mitte sauber anvisiert ist.
+            # Anti-Stall: Hängt die Drohne länger als NEAR_COMMIT_TIMEOUT vor dem
+            # Ring (oder rutscht er gleich aus dem Bild), wird der Durchflug
+            # erzwungen — lieber leicht außermittig durch als stehen bleiben.
             if radius >= self.APPROACH_RADIUS:
-                if centering_error <= self.ALIGN_THRESH or radius >= self.APPROACH_RADIUS * 1.3:
+                if self._near_since is None:
+                    self._near_since = time.time()
+                commit = (
+                    centering_error <= self.ALIGN_THRESH * 1.2
+                    or radius >= self.APPROACH_RADIUS * 1.3
+                    or time.time() - self._near_since > self.NEAR_COMMIT_TIMEOUT
+                )
+                if commit:
                     self.state = RingState.PASSING
                     self._pass_start = time.time()
                     self._reset_tracking()
                     return (0, self.PASS_SPEED, 0, 0)
+                # Kurz nachzentrieren — aber langsam WEITER vorwärts, nie stehen
                 a = self._clamp(err_x * self.KP_LATERAL, -35, 35)
                 c = self._clamp(-err_y * self.KP_VERTICAL, -35, 35)
-                self._last_forward = 0
-                return (a, 0, c, 0)
+                self._last_forward = 10
+                return (a, 10, c, 0)
+            self._near_since = None
 
             # Zentrieren mit VOLLER Verstärkung — das Loch exakt anvisieren.
             a = self._clamp(err_x * self.KP_LATERAL, -35, 35)
             c = self._clamp(-err_y * self.KP_VERTICAL, -35, 35)
 
-            # Nur vorwärts, wenn zentriert; je weiter von der Mitte weg, desto
-            # langsamer. So fliegt die Drohne durch die MITTE statt über den Ring.
-            if centering_error > self.ALIGN_THRESH:
-                forward = 0  # erst sauber auf die Mitte zentrieren
+            # Vorwärts mit Mindesttempo: je weiter von der Mitte weg, desto
+            # langsamer — aber nie ganz stehen bleiben, solange der Fehler nicht
+            # massiv ist. Korrigiert wird WÄHREND des Fliegens.
+            if centering_error > self.ALIGN_THRESH * 2:
+                forward = 0  # sehr weit daneben → erst grob zentrieren
             else:
-                progress = radius / self.APPROACH_RADIUS  # 0 fern → 1 nah
-                forward = int(self.FORWARD_MAX - progress * (self.FORWARD_MAX - self.FORWARD_MIN))
-                forward = int(forward * (1.0 - centering_error / self.ALIGN_THRESH))
+                progress = min(1.0, radius / self.APPROACH_RADIUS)  # 0 fern → 1 nah
+                base = self.FORWARD_MAX - progress * (self.FORWARD_MAX - self.FORWARD_MIN)
+                scale = max(0.35, 1.0 - centering_error / (self.ALIGN_THRESH * 2.0))
+                forward = max(int(base * scale), 8)
             self._last_forward = forward
             return (a, forward, c, 0)
 

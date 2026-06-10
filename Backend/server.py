@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import os
 import threading
@@ -13,6 +12,12 @@ os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")  # OpenCV-Logger leiser stell
 # FFmpeg-AVLog auf "fatal" (8) → unterdrückt das harmlose H.264-Dekodier-Rauschen
 # ("error while decoding MB ... bytestream -6"), das bei UDP-Streams normal ist.
 os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "8")
+# Low-Delay-Decoding: kein Demuxer-Puffer, kein Frame-Threading (jeder
+# Decoder-Thread puffert sonst einen Frame → mehrere 100 ms Zusatz-Latenz).
+os.environ.setdefault(
+    "OPENCV_FFMPEG_CAPTURE_OPTIONS",
+    "fflags;nobuffer|flags;low_delay|threads;1",
+)
 
 import cv2
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -90,77 +95,189 @@ _video_cap: cv2.VideoCapture | None = None
 # neuesten. Das hält den UDP-/FFmpeg-Puffer ständig geleert → deutlich weniger
 # H.264-Dekodierfehler und kein Lag. Der WebSocket greift nur den letzten Frame ab.
 _latest_frame = None
+_frame_seq = 0          # zählt hoch bei jedem neuen Frame → Clients senden nur frische Bilder
 _frame_lock = threading.Lock()
-_grabber_running = False
+# Stop-Event PRO Grabber-Generation: Ein globales Bool würde ein altes, noch
+# laufendes Grabber-Exemplar "wiederbeleben", sobald ein neues gestartet wird.
+_grabber_stop: threading.Event | None = None
 _grabber_thread: threading.Thread | None = None
 
 
-def _frame_grabber() -> None:
+def _open_stream(stop_event: threading.Event):
+    """Öffnet den UDP-Videostream mit Bind-Retry. Gibt VideoCapture oder None zurück."""
+    # fifo_size vergrößert den UDP-Empfangspuffer → weniger verworfene Pakete.
+    url = "udp://@0.0.0.0:11111?overrun_nonfatal=1&fifo_size=5000000"
+    # OPEN/READ-Timeout: ohne diese bleibt cap.read() bei totem Stream EWIG
+    # blockiert → der Grabber-Thread terminiert beim Disconnect nicht und hält
+    # Port 11111 → neuer Grabber bekommt "bind failed -10048". Mit Timeout kehrt
+    # read() spätestens nach READ_TIMEOUT zurück, die Schleife prüft stop_event.
+    base_params = [
+        cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 6000,
+        cv2.CAP_PROP_READ_TIMEOUT_MSEC, 3000,
+    ]
+    for attempt in range(5):
+        if stop_event.is_set():
+            return None
+        # Erst mit explizitem Single-Thread-Decoder (geringste Latenz),
+        # bei Ablehnung durch das Backend ohne den Thread-Parameter.
+        cap = None
+        try:
+            cap = cv2.VideoCapture(
+                url, cv2.CAP_FFMPEG, [cv2.CAP_PROP_N_THREADS, 1] + base_params
+            )
+        except cv2.error:
+            cap = None
+        if cap is None or not cap.isOpened():
+            if cap is not None:
+                cap.release()
+            cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG, base_params)
+        if cap.isOpened():
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            return cap
+        cap.release()
+        if stop_event.wait(1.0):
+            return None
+    return None
+
+
+def _frame_grabber(stop_event: threading.Event) -> None:
     """
     Öffnet den UDP-Stream im eigenen Thread (blockiert NICHT den Event-Loop),
     liest dann dauerhaft Frames (drainiert den Puffer) und übernimmt die Aufnahme.
+    Bricht der Stream ab (mehrere Read-Timeouts in Folge), wird er automatisch
+    neu geöffnet — so erholt sich das Video nach einem WLAN-Aussetzer von selbst.
     """
-    global _latest_frame, _video_cap, video_writer, current_recording_filename, is_recording
-
-    # fifo_size vergrößert den UDP-Empfangspuffer → weniger verworfene Pakete.
-    cap = cv2.VideoCapture(
-        "udp://@0.0.0.0:11111?overrun_nonfatal=1&fifo_size=5000000",
-        cv2.CAP_FFMPEG,
-    )
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    if not cap.isOpened():
-        cap.release()
-        print("[WARN] Video-Stream konnte nicht geöffnet werden (Port 11111 belegt?)")
-        return
-    _video_cap = cap
+    global _latest_frame, _frame_seq, _video_cap, video_writer, current_recording_filename, is_recording
 
     try:
-        while _grabber_running:
-            ret, frame = cap.read()
-            if not ret:
-                time.sleep(0.005)
-                continue
+        while not stop_event.is_set():
+            cap = _open_stream(stop_event)
+            if cap is None:
+                if stop_event.is_set():
+                    return
+                print("[WARN] Video-Stream konnte nicht geöffnet werden (Port 11111 belegt?)")
+                return
+            _video_cap = cap
+            fail_count = 0
+            try:
+                while not stop_event.is_set():
+                    ret, frame = cap.read()
+                    if not ret:
+                        # Read-Timeout/Streamfehler. Bei Stop sofort raus.
+                        if stop_event.is_set():
+                            break
+                        fail_count += 1
+                        # 2 Timeouts in Folge (~6 s totale Stille) → Stream tot,
+                        # Capture neu öffnen statt einzufrieren.
+                        if fail_count >= 2:
+                            print("[INFO] Video-Stream unterbrochen — öffne neu...")
+                            break
+                        time.sleep(0.01)
+                        continue
+                    fail_count = 0
 
-            # --- Aufnahme (rohe Frames in voller Rate, ohne Overlays) ---
-            if is_recording:
-                if video_writer is None:
-                    h, w = frame.shape[:2]
-                    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                    current_recording_filename = f"drohne_{int(time.time())}.mp4"
-                    filepath = os.path.join(RECORDINGS_DIR, current_recording_filename)
-                    video_writer = cv2.VideoWriter(filepath, fourcc, 30.0, (w, h))
-                video_writer.write(frame)
-            elif video_writer is not None:
-                video_writer.release()
-                video_writer = None
+                    # --- Aufnahme (rohe Frames in voller Rate, ohne Overlays) ---
+                    if is_recording:
+                        if video_writer is None:
+                            h, w = frame.shape[:2]
+                            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                            current_recording_filename = f"drohne_{int(time.time())}.mp4"
+                            filepath = os.path.join(RECORDINGS_DIR, current_recording_filename)
+                            video_writer = cv2.VideoWriter(filepath, fourcc, 30.0, (w, h))
+                        video_writer.write(frame)
+                    elif video_writer is not None:
+                        video_writer.release()
+                        video_writer = None
 
-            with _frame_lock:
-                _latest_frame = frame
+                    with _frame_lock:
+                        _latest_frame = frame
+                        _frame_seq += 1
+            finally:
+                cap.release()
+                _video_cap = None
     finally:
         if video_writer is not None:
             video_writer.release()
             video_writer = None
-        cap.release()
-        _video_cap = None
         with _frame_lock:
             _latest_frame = None
 
 
 def _open_video_cap() -> None:
-    global _grabber_running, _grabber_thread
+    global _grabber_stop, _grabber_thread
     _close_video_cap()
-    _grabber_running = True
-    _grabber_thread = threading.Thread(target=_frame_grabber, daemon=True)
+    _grabber_stop = threading.Event()
+    _grabber_thread = threading.Thread(
+        target=_frame_grabber, args=(_grabber_stop,), daemon=True
+    )
     _grabber_thread.start()
 
 
 def _close_video_cap() -> None:
-    global _grabber_running, _grabber_thread, is_recording
-    _grabber_running = False
+    global _grabber_stop, _grabber_thread, is_recording
+    if _grabber_stop is not None:
+        _grabber_stop.set()
     if _grabber_thread is not None:
-        _grabber_thread.join(timeout=2.0)
+        _grabber_thread.join(timeout=5.0)
+        if _grabber_thread.is_alive():
+            print("[WARN] Alter Video-Grabber beendet sich nicht rechtzeitig")
         _grabber_thread = None
+    _grabber_stop = None
     is_recording = False
+
+
+# ---------------------------------------------------------------------------
+# Ring-Erkennungs-Worker: läuft im eigenen Thread parallel zum Video-Grabber.
+# Vorteile gegenüber Erkennung in der WebSocket-Schleife:
+#   - bremst die Video-Sendeschleife nicht aus (weniger Latenz)
+#   - verarbeitet jeden frischen Frame (~30 Hz statt jeden 2.) → präziseres Tracking
+#   - Navigation funktioniert auch ohne geöffnetes Video im Frontend
+# ---------------------------------------------------------------------------
+_ring_worker_stop: threading.Event | None = None
+_ring_worker_thread: threading.Thread | None = None
+
+
+def _ring_detection_worker(stop_event: threading.Event) -> None:
+    last_seq = -1
+    while not stop_event.is_set():
+        with _frame_lock:
+            fresh = _latest_frame is not None and _frame_seq != last_seq
+            seq = _frame_seq
+            frame = _latest_frame.copy() if fresh else None
+        if frame is None:
+            time.sleep(0.005)
+            continue
+        last_seq = seq
+        try:
+            ring_detection.ring = ring_detection.detect(frame)
+        except Exception as e:
+            print(f"[RING] Erkennungsfehler: {e}")
+            continue
+        nav = ring_navigator
+        if nav is not None:
+            h, w = frame.shape[:2]
+            nav.set_frame_size(w, h)
+            nav.update_ring(ring_detection.ring)
+
+
+def _start_ring_worker() -> None:
+    global _ring_worker_stop, _ring_worker_thread
+    _stop_ring_worker()
+    _ring_worker_stop = threading.Event()
+    _ring_worker_thread = threading.Thread(
+        target=_ring_detection_worker, args=(_ring_worker_stop,), daemon=True
+    )
+    _ring_worker_thread.start()
+
+
+def _stop_ring_worker() -> None:
+    global _ring_worker_stop, _ring_worker_thread
+    if _ring_worker_stop is not None:
+        _ring_worker_stop.set()
+    if _ring_worker_thread is not None:
+        _ring_worker_thread.join(timeout=1.0)
+        _ring_worker_thread = None
+    _ring_worker_stop = None
 
 # Ring-Modus: autonomes Durchfliegen von Ringen
 ring_mode_active = False
@@ -206,6 +323,38 @@ RC_DIRECTION_MAP = {
 # Verbindungs-Endpoints
 # ---------------------------------------------------------------------------
 
+def _discover_tello(subnet_hint: str) -> str | None:
+    """
+    Sucht eine Tello im /24-Subnetz der übergebenen IP: schickt 'command' an
+    alle Adressen und wartet auf ein 'ok'. Nötig, weil DHCP (z. B. iPhone-
+    Hotspot) der Drohne nach jedem Einschalten eine andere IP geben kann.
+    """
+    import socket as sock_mod
+
+    prefix = ".".join(subnet_hint.split(".")[:3])
+    s = sock_mod.socket(sock_mod.AF_INET, sock_mod.SOCK_DGRAM)
+    try:
+        s.settimeout(0.02)
+        for i in range(1, 255):
+            try:
+                s.sendto(b"command", (f"{prefix}.{i}", 8889))
+            except OSError:
+                pass
+        s.settimeout(3.0)
+        while True:
+            try:
+                resp, addr = s.recvfrom(1024)
+                if resp.strip() == b"ok":
+                    return addr[0]
+            except sock_mod.timeout:
+                return None
+            except ConnectionResetError:
+                # ICMP "Port unreachable" anderer Geräte — ignorieren
+                continue
+    finally:
+        s.close()
+
+
 @app.post("/connect")
 async def connect(data: dict):
     global control, telemetry, status_led
@@ -216,7 +365,18 @@ async def connect(data: dict):
     status_led = StatusLED(drone_connection, ip)
     status_led.connecting()
 
-    success = drone_connection.connect(ip)
+    # Blockierende Netzwerk-Operationen im Threadpool, damit der Server
+    # während des Verbindens erreichbar bleibt.
+    loop = asyncio.get_running_loop()
+    success = await loop.run_in_executor(None, drone_connection.connect, ip)
+
+    if not success:
+        print("[INFO] Keine Antwort — suche Tello im Subnetz...")
+        found = await loop.run_in_executor(None, _discover_tello, ip)
+        if found and found != ip:
+            print(f"[INFO] Tello gefunden unter {found} — verbinde...")
+            ip = found
+            success = await loop.run_in_executor(None, drone_connection.connect, ip)
 
     if success:
         drone_connection.send_command("command")
@@ -226,11 +386,13 @@ async def connect(data: dict):
         control = Control(drone_connection)
         telemetry = Telemetry(drone_connection)
         print("[INFO] Steuerung und Telemetrie initialisiert")
-        _open_video_cap()
+        # Im Executor: _open_video_cap kann auf einen alten Grabber warten (join)
+        # und darf den Event-Loop nicht blockieren.
+        await loop.run_in_executor(None, _open_video_cap)
     else:
         status_led.error()
 
-    return {"success": success}
+    return {"success": success, "ip": ip}
 
 
 @app.post("/disconnect")
@@ -238,6 +400,7 @@ async def disconnect():
     global control, telemetry, status_led, ring_mode_active, ring_navigator
 
     if ring_mode_active and ring_navigator is not None:
+        _stop_ring_worker()
         ring_navigator.stop()
         ring_mode_active = False
         ring_detection.enabled = False
@@ -248,7 +411,10 @@ async def disconnect():
             status_led.off()
         drone_connection.send_command("streamoff")
 
-    _close_video_cap()
+    # Im Executor: _close_video_cap wartet (join) auf den Grabber-Thread und
+    # darf den Event-Loop nicht blockieren.
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _close_video_cap)
     drone_connection.disconnect()
     control = None
     telemetry = None
@@ -449,8 +615,10 @@ async def toggle_ring_mode():
     if ring_mode_active:
         ring_navigator = RingNavigator(control, frame_width=960, frame_height=720)
         ring_navigator.start()
+        _start_ring_worker()
         print("[RING] Ring-Modus aktiviert")
     else:
+        _stop_ring_worker()
         if ring_navigator is not None:
             ring_navigator.stop()
         ring_detection.ring = None
@@ -846,39 +1014,33 @@ async def video_stream(websocket: WebSocket):
         await websocket.close()
         return
 
-    # ------------------------------------------------------------------
-    # Grabber-Thread: liest Frames so schnell wie möglich und verwirft
-    # alle außer dem neuesten → OpenCV-Puffer läuft nie voll.
-    # ------------------------------------------------------------------
-    _latest_frame: list = [None]          # [0] = aktuellster Frame (numpy array)
-    _new_frame = threading.Event()        # wird gesetzt, sobald ein neuer Frame da ist
-    _grabber_running = [True]
-
-    def _grab_frames():
-        """Leert OpenCV-Puffer kontinuierlich, hält nur neuesten Frame."""
-        while _grabber_running[0]:
-            try:
-                ret, frame = cap.read()
-                if ret:
-                    _latest_frame[0] = frame
-                else:
-                    print("[VIDEO] cap.read() → ret=False")
-            except Exception as e:
-                print(f"[VIDEO] Grabber-Fehler: {e}")
-                break
-
-    grabber = threading.Thread(target=_grab_frames, daemon=True)
-    grabber.start()
-
     loop = asyncio.get_running_loop()
-    _ring_size_set = False
+    last_seq = -1
+
+    STREAM_WIDTH = 640  # Sendegröße: kleiner = schnelleres Encoding + weniger Bandbreite
 
     def _encode(f) -> bytes:
-        ok, buf = cv2.imencode(".jpg", f, [cv2.IMWRITE_JPEG_QUALITY, 60])
+        h, w = f.shape[:2]
+        if w > STREAM_WIDTH:
+            f = cv2.resize(
+                f, (STREAM_WIDTH, int(h * STREAM_WIDTH / w)),
+                interpolation=cv2.INTER_AREA,
+            )
+        ok, buf = cv2.imencode(".jpg", f, [cv2.IMWRITE_JPEG_QUALITY, 65])
         return buf.tobytes() if ok else b""
 
     try:
         while True:
+            # Auf den nächsten FRISCHEN Frame warten statt festem 30-ms-Takt:
+            # minimale Zusatz-Latenz, kein doppeltes Senden desselben Bildes.
+            waited = 0.0
+            while _frame_seq == last_seq and waited < 1.0:
+                await asyncio.sleep(0.005)
+                waited += 0.005
+            # Nach 1 s ohne neuen Frame trotzdem weitermachen (letztes Bild erneut
+            # senden), damit ein Verbindungsabbruch des Clients erkannt wird.
+            last_seq = _frame_seq
+
             # Neuesten Frame vom Grabber-Thread abgreifen (Kopie, damit Overlays
             # das geteilte Bild nicht verändern).
             with _frame_lock:
@@ -897,21 +1059,9 @@ async def video_stream(websocket: WebSocket):
                     )
                 detection.draw(frame, detection.boxes)
 
-            # --- Ring-Erkennung & autonome Navigation ---
+            # --- Ring-Overlay (Erkennung läuft im eigenen Worker-Thread) ---
             if ring_detection.enabled:
-                ring_detection.frame_count += 1
-                if ring_detection.frame_count % ring_detection.DETECT_EVERY_N == 0:
-                    ring_detection.ring = await loop.run_in_executor(
-                        None, ring_detection.detect, frame
-                    )
                 ring_detection.draw(frame, ring_detection.ring)
-
-                if ring_navigator is not None:
-                    if not _ring_size_set:
-                        h_f, w_f = frame.shape[:2]
-                        ring_navigator.set_frame_size(w_f, h_f)
-                        _ring_size_set = True
-                    ring_navigator.update_ring(ring_detection.ring)
 
                 # State-Label ins Bild einblenden
                 state_label = ring_navigator.status.get("state", "") if ring_navigator else ""
@@ -921,10 +1071,11 @@ async def video_stream(websocket: WebSocket):
                 )
 
             # --- Frame senden (Encoding im Executor, blockiert den Loop nicht) ---
+            # Binär statt base64-Text: ~33 % weniger Daten, kein Decode-Overhead
+            # im Frontend → spürbar weniger Latenz.
             jpg = await loop.run_in_executor(None, _encode, frame)
             if jpg:
-                await websocket.send_text(base64.b64encode(jpg).decode("utf-8"))
-            await asyncio.sleep(0.03)  # ~30 fps
+                await websocket.send_bytes(jpg)
 
     except WebSocketDisconnect:
         pass
@@ -934,9 +1085,25 @@ async def video_stream(websocket: WebSocket):
 # WebSocket: RC-Steuerung & Telemetrie
 # ---------------------------------------------------------------------------
 
+# Verhindert, dass schnelles Mehrfach-Tippen auf Takeoff/Land Dutzende Threads
+# stapelt. Läuft bereits ein blockierender Befehl, werden weitere ignoriert.
+_blocking_cmd_lock = threading.Lock()
+
+
+def _run_exclusive(fn) -> None:
+    if not _blocking_cmd_lock.acquire(blocking=False):
+        print("[INFO] Befehl ignoriert — vorheriger Start/Lande-Befehl läuft noch")
+        return
+    try:
+        fn()
+    finally:
+        _blocking_cmd_lock.release()
+
+
 def _force_stop_all() -> None:
     """Stoppt Ring-Modus und Flugkurs sofort (für Not-Aus / sicheres Trennen)."""
     global ring_mode_active, ring_navigator, auto_flight_active
+    _stop_ring_worker()
     if ring_navigator is not None:
         ring_navigator.stop()
         ring_navigator = None
@@ -1014,9 +1181,13 @@ async def rc_control(websocket: WebSocket):
 
             if cmd:
                 if cmd == "takeoff":
-                    threading.Thread(target=control.takeoff, daemon=True).start()
+                    threading.Thread(
+                        target=_run_exclusive, args=(control.takeoff,), daemon=True
+                    ).start()
                 elif cmd == "land":
-                    threading.Thread(target=control.land, daemon=True).start()
+                    threading.Thread(
+                        target=_run_exclusive, args=(control.land,), daemon=True
+                    ).start()
                 continue
 
             last_rc["a"] = int(msg.get("a", 0))

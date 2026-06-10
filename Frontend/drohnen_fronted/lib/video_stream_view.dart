@@ -44,7 +44,12 @@ class _VideoStreamViewState extends State<VideoStreamView> {
         }
 
         try {
-          final Uint8List imageBytes = base64Decode(snapshot.data as String);
+          // Backend sendet binäre JPEG-Frames; base64-Text wird als
+          // Fallback weiterhin unterstützt.
+          final dynamic data = snapshot.data;
+          final Uint8List imageBytes = data is String
+              ? base64Decode(data)
+              : (data is Uint8List ? data : Uint8List.fromList(data as List<int>));
           return SizedBox(
             width: double.infinity,
             height: double.infinity,
