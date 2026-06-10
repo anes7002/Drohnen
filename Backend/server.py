@@ -820,7 +820,7 @@ async def delete_recording(rec_id: int):
 @app.websocket("/video")
 async def video_stream(websocket: WebSocket):
     """
-    Streamt Drohnen-Videoframes als Base64-JPEG über WebSocket.
+    Streamt Drohnen-Videoframes als binäre JPEG-Bytes über WebSocket.
     Unterstützt gleichzeitig:
       - Video-Aufnahme als MP4 (gesteuert via /recordings/start + /stop)
       - AI-Erkennung (gesteuert via /detection/toggle)
@@ -841,6 +841,30 @@ async def video_stream(websocket: WebSocket):
         await websocket.send_json({"error": "Kein Videosignal"})
         await websocket.close()
         return
+
+    # ------------------------------------------------------------------
+    # Grabber-Thread: liest Frames so schnell wie möglich und verwirft
+    # alle außer dem neuesten → OpenCV-Puffer läuft nie voll.
+    # ------------------------------------------------------------------
+    _latest_frame: list = [None]          # [0] = aktuellster Frame (numpy array)
+    _new_frame = threading.Event()        # wird gesetzt, sobald ein neuer Frame da ist
+    _grabber_running = [True]
+
+    def _grab_frames():
+        """Leert OpenCV-Puffer kontinuierlich, hält nur neuesten Frame."""
+        while _grabber_running[0]:
+            try:
+                ret, frame = cap.read()
+                if ret:
+                    _latest_frame[0] = frame
+                else:
+                    print("[VIDEO] cap.read() → ret=False")
+            except Exception as e:
+                print(f"[VIDEO] Grabber-Fehler: {e}")
+                break
+
+    grabber = threading.Thread(target=_grab_frames, daemon=True)
+    grabber.start()
 
     loop = asyncio.get_running_loop()
     _ring_size_set = False

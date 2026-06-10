@@ -24,7 +24,7 @@ CREATE TABLE video (
     aufnahmedatum TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Tabelle für Aufnahmen (vom Backend verwendet)
+-- Tabelle für Videoaufnahmen (Recordings)
 CREATE TABLE recordings (
     id SERIAL PRIMARY KEY,
     filename TEXT NOT NULL,
