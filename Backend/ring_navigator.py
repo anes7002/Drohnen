@@ -19,8 +19,8 @@ class RingNavigator:
 
     States:
       SEARCHING  — slowly rotates until a ring appears in the frame.
-      ALIGNING   — centers the ring in the frame (lateral + vertical correction).
-      APPROACHING — ring is centered, drone flies toward it while maintaining alignment.
+      ALIGNING   — dreht sich (Yaw) zum Ring, bis er frontal im Bild sitzt (+ Höhenkorrektur).
+      APPROACHING — Ring frontal anvisiert; fliegt darauf zu und hält die Ausrichtung per Yaw.
       PASSING    — ring fills enough of the frame; drone flies straight through at full speed.
       After PASSING the state returns to SEARCHING (to look for the next ring).
 
@@ -32,8 +32,9 @@ class RingNavigator:
     """
 
     # ── Tunable parameters ────────────────────────────────────────────────────
-    KP_LATERAL: float = 0.25     # proportional gain: lateral (left/right) correction
+    KP_YAW: float = 0.18         # proportional gain: Ausrichtung per DREHUNG (Yaw) statt Strafen
     KP_VERTICAL: float = 0.25    # proportional gain: vertical (up/down) correction
+    YAW_MAX: int = 35            # max. Drehrate (RC-Einheiten) beim Ausrichten
     ALIGN_THRESH: int = 60       # pixel error below which the ring is "centered" (vertikal)
     # Seitlich STRENGER als vertikal: Links/rechts-Treffgenauigkeit ist für den
     # Durchflug am kritischsten. Erst wenn der Ring lateral so genau anvisiert UND
@@ -292,15 +293,17 @@ class RingNavigator:
             self._last_forward = 0
             err_x, err_y = self._errors(ring)
 
-            # Reine Zentrierung — NICHT vorwärts (sonst driftet sie beim Ausrichten weg)
-            a = self._clamp(err_x * self.KP_LATERAL, -40, 40)
+            # Ausrichtung per DREHUNG (Yaw) statt seitlichem Schieben — so baut die
+            # Drohne keine Quer-Geschwindigkeit auf, die sie später am Ring vorbeiträgt.
+            # Höhe wird weiter per Hoch/Runter korrigiert (geht nicht per Yaw).
+            d = self._clamp(err_x * self.KP_YAW, -self.YAW_MAX, self.YAW_MAX)
             c = self._clamp(-err_y * self.KP_VERTICAL, -40, 40)  # invert: ring below → fly down
 
-            # Seitlich STRENG zentrieren, bevor angeflogen wird.
+            # Erst wenn die Drohne den Ring frontal anschaut (kleiner Seitenfehler), anfliegen.
             if abs(err_x) < self.ALIGN_THRESH_X and abs(err_y) < self.ALIGN_THRESH:
                 self.state = RingState.APPROACHING
 
-            return (a, 0, c, 0)
+            return (0, 0, c, d)
 
         # ── APPROACHING ───────────────────────────────────────────────────────
         if self.state == RingState.APPROACHING:
@@ -317,7 +320,7 @@ class RingNavigator:
             err_x, err_y = self._errors(ring)
             centering_error = max(abs(err_x), abs(err_y))
 
-            # Seitlich/vertikal zu weit daneben → zurück zum reinen Ausrichten.
+            # Seitlich/vertikal zu weit daneben → zurück zum reinen Ausrichten (Drehen).
             if abs(err_x) > self.ALIGN_THRESH_X * 3 or abs(err_y) > self.ALIGN_THRESH * 1.5:
                 self._last_forward = 0
                 self._near_since = None
@@ -332,12 +335,12 @@ class RingNavigator:
             if radius >= self.APPROACH_RADIUS:
                 if self._near_since is None:
                     self._near_since = time.time()
-                a = self._clamp(err_x * self.KP_LATERAL, -35, 35)
+                d = self._clamp(err_x * self.KP_YAW, -self.YAW_MAX, self.YAW_MAX)
                 c = self._clamp(-err_y * self.KP_VERTICAL, -35, 35)
 
                 # "Ausgeschwungen": Seitenfehler klein UND ändert sich kaum (keine
-                # seitliche Restgeschwindigkeit). Nur dann geht der Blindflug gerade
-                # durch die Mitte statt seitlich vorbei.
+                # Restdrehung mehr). Nur dann geht der Blindflug gerade durch die
+                # Mitte statt schräg vorbei.
                 settled_x = (
                     self._prev_err_x is not None
                     and abs(err_x - self._prev_err_x) <= self.SETTLE_DELTA
@@ -349,7 +352,7 @@ class RingNavigator:
                     and settled_x
                 )
                 # Erzwungener Durchflug nur als Sicherung (Ring rutscht aus dem Bild
-                # oder Anti-Stall-Timeout), sonst exakt zentriert durchfliegen.
+                # oder Anti-Stall-Timeout), sonst exakt ausgerichtet durchfliegen.
                 commit = (
                     centered
                     or radius >= self.APPROACH_RADIUS * 1.6
@@ -360,28 +363,28 @@ class RingNavigator:
                     self._pass_start = time.time()
                     self._reset_tracking()
                     return (0, self.PASS_SPEED, 0, 0)
-                # Noch nicht exakt mittig → AUF DER STELLE zentrieren (KEIN Vorwärts!),
-                # damit keine seitliche Drift entsteht und sie nicht vorbeifliegt.
+                # Noch nicht frontal ausgerichtet → AUF DER STELLE drehen (KEIN
+                # Vorwärts!), damit keine Drift entsteht und sie nicht vorbeifliegt.
                 self._last_forward = 0
-                return (a, 0, c, 0)
+                return (0, 0, c, d)
             self._near_since = None
             self._prev_err_x = None
 
-            # Zentrieren mit VOLLER Verstärkung — das Loch exakt anvisieren.
-            a = self._clamp(err_x * self.KP_LATERAL, -35, 35)
+            # Ausrichten per DREHUNG mit voller Verstärkung — das Loch anvisieren.
+            d = self._clamp(err_x * self.KP_YAW, -self.YAW_MAX, self.YAW_MAX)
             c = self._clamp(-err_y * self.KP_VERTICAL, -35, 35)
 
             # Vorwärts mit Mindesttempo: je weiter von der Mitte weg, desto
             # langsamer — aber nie ganz stehen bleiben, solange der Fehler nicht
-            # massiv ist. Korrigiert wird WÄHREND des Fliegens.
+            # massiv ist. Korrigiert (gedreht) wird WÄHREND des Fliegens.
             if centering_error > self.ALIGN_THRESH * 2:
-                forward = 0  # sehr weit daneben → erst grob zentrieren
+                forward = 0  # sehr weit daneben → erst grob ausrichten
             else:
                 progress = min(1.0, radius / self.APPROACH_RADIUS)  # 0 fern → 1 nah
                 base = self.FORWARD_MAX - progress * (self.FORWARD_MAX - self.FORWARD_MIN)
                 scale = max(0.35, 1.0 - centering_error / (self.ALIGN_THRESH * 2.0))
                 forward = max(int(base * scale), 8)
             self._last_forward = forward
-            return (a, forward, c, 0)
+            return (0, forward, c, d)
 
         return (0, 0, 0, 0)
