@@ -104,6 +104,18 @@ class DroneConnection:
         if self.connected and self.socket:
             self.socket.sendto(command.encode("utf-8"), (self.ip_address, self.DRONE_PORT))
 
+    def set_ledm(self, led_string: str):
+        """Zeigt ein Muster auf der 8x8-LED-Matrix (Tello Talent).
+
+        Wichtig: Das Erweiterungskommando muss mit GROSSEM 'EXT' gesendet werden,
+        sonst ignoriert die Tello-Talent-Firmware den Matrix-Befehl.
+        led_string: Pixel als String aus '0' (aus), 'r' (rot), 'b' (blau), 'p' (lila).
+        """
+        if self.connected and self.socket:
+            message = f"EXT mled g {led_string}"
+            self.socket.sendto(message.encode("utf-8"), (self.ip_address, self.DRONE_PORT))
+            print(f"[MLED] {message}")
+
     def send_command_with_response(self, command: str, timeout=None) -> str:
         """
         Sendet einen Befehl und wartet auf die Antwort der Drohne ("ok" / "error").

@@ -19,10 +19,11 @@ class StatusLED:
         self.set_color(255, 0, 0)
 
     def set_color(self, r, g, b):
-        # Tello EDU ohne Erweiterungsmodul kennt keine "ext led"-Befehle
-        # (Antwort: "unknown command: ext"). LED-Steuerung daher deaktiviert,
-        # damit der Verbindungs-Handshake nicht gestört wird.
-        pass
+        # Tello Talent: Das Erweiterungskommando MUSS gross 'EXT' sein
+        # (kleines 'ext' -> Drohne antwortet "unknown command: ext").
+        # send_command sendet nur, wenn bereits verbunden -> stoert den
+        # Handshake nicht (waehrend "connecting" ist connected noch False).
+        self.connection.send_command(f"EXT led {r} {g} {b}")
 
     def off(self):
         self.set_color(0, 0, 0)

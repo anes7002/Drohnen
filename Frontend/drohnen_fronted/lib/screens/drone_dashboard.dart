@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
 import '../widgets/led_matrix_control.dart'; // Pfad ggf. anpassen
+import '../widgets/led_matrix_grid.dart';
 
 import '../video_stream_view.dart';
 import '../models/flug_step.dart';
@@ -796,7 +797,16 @@ class _DroneDashboardState extends State<DroneDashboard> {
         backgroundColor: Colors.transparent,
         child: SizedBox(
           width: 350,
-          child: LedMatrixControl(backendHost: backendHost),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                LedMatrixControl(backendHost: backendHost),
+                const SizedBox(height: 12),
+                LedMatrixGrid(backendHost: backendHost),
+              ],
+            ),
+          ),
         ),
       ),
     );

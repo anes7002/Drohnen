@@ -283,12 +283,6 @@ def _stop_ring_worker() -> None:
 ring_mode_active = False
 ring_navigator: RingNavigator | None = None
 
-# Tello EDU matrix: 64 chars, each '0'=off, 'r'=red, 'b'=blue, 'p'=purple
-_TT_PATTERN = "00rrrr000r0000r0r0r00r0rr000000rr0r00r0rr00rr00r0r0000r000rrrr00"
-_current_mled_pattern: str = _TT_PATTERN
-_mled_on: bool = True
-_mled_blink_task: asyncio.Task | None = None
-
 
 # ---------------------------------------------------------------------------
 # Video-Aufnahme-Zustand
@@ -439,9 +433,9 @@ async def set_led(data: dict):
         r2 = max(0, min(255, int(data.get("r2", 0))))
         g2 = max(0, min(255, int(data.get("g2", 0))))
         b2 = max(0, min(255, int(data.get("b2", 0))))
-        drone_connection.send_command(f"ext led bl {freq} {r} {g} {b} {r2} {g2} {b2}")
+        drone_connection.send_command(f"EXT led bl {freq} {r} {g} {b} {r2} {g2} {b2}")
     else:
-        drone_connection.send_command(f"ext led {r} {g} {b}")
+        drone_connection.send_command(f"EXT led {r} {g} {b}")
 
     return {"success": True}
 
@@ -450,136 +444,17 @@ async def set_led(data: dict):
 # Matrix-LED-Steuerung (8x8)
 # ---------------------------------------------------------------------------
 
-@app.get("/mled/pattern")
-async def get_mled_pattern():
-    """Gibt das zuletzt gesendete (oder Standard-TT) Muster und Effekt-Status zurück."""
-    return {
-        "success": True,
-        "pattern": _current_mled_pattern,
-        "on": _mled_on,
-        "blinking": _mled_blink_task is not None and not _mled_blink_task.done(),
-    }
-
-
-async def _stop_blink():
-    """Bricht eine laufende Blink-Schleife sauber ab."""
-    global _mled_blink_task
-    task = _mled_blink_task
-    _mled_blink_task = None
-    if task is not None and not task.done():
-        task.cancel()
-        try:
-            await task
-        except (asyncio.CancelledError, Exception):
-            pass
-
-
-async def _blink_loop(freq: float):
-    """Schaltet die Matrix abwechselnd ein und aus (Pattern ↔ Clear)."""
-    interval = 1.0 / max(freq, 0.1)
-    visible = True
-    try:
-        while True:
-            if visible:
-                drone_connection.send_command(f"ext mled g {_current_mled_pattern}")
-            else:
-                drone_connection.send_command("ext mled sc")
-            visible = not visible
-            await asyncio.sleep(interval)
-    except asyncio.CancelledError:
-        # Beim Stoppen den finalen Sichtbarkeitszustand wiederherstellen
-        if _mled_on:
-            drone_connection.send_command(f"ext mled g {_current_mled_pattern}")
-        else:
-            drone_connection.send_command("ext mled sc")
-        raise
-
-
 @app.post("/mled")
 async def set_mled(data: dict):
-    global _current_mled_pattern
-    if not drone_connection.connected:
-        return {"success": False, "error": "Nicht verbunden"}
+    """Zeigt ein Muster auf der 8x8-LED-Matrix (Tello Talent).
 
-    pattern = data.get("pattern", "")
-    if len(pattern) != 64 or not all(c in "0rbp" for c in pattern):
-        return {"success": False, "error": "Muster muss 64 Zeichen aus '0','r','b','p' sein"}
-
-    _current_mled_pattern = pattern
-    # Wenn aktuell geblinkt wird, nutzt die Schleife das neue Muster beim nächsten Tick.
-    # Wenn die Matrix aus ist, das Muster nur speichern und nicht anzeigen.
-    blinking = _mled_blink_task is not None and not _mled_blink_task.done()
-    if _mled_on and not blinking:
-        drone_connection.send_command(f"ext mled g {pattern}")
-    return {"success": True}
-
-
-@app.post("/mled/visibility")
-async def set_mled_visibility(data: dict):
-    """Schaltet die Matrix komplett an/aus, ohne das Muster zu verlieren."""
-    global _mled_on
-    if not drone_connection.connected:
-        return {"success": False, "error": "Nicht verbunden"}
-
-    _mled_on = bool(data.get("on", True))
-    await _stop_blink()
-    if _mled_on:
-        drone_connection.send_command(f"ext mled g {_current_mled_pattern}")
-    else:
-        drone_connection.send_command("ext mled sc")
-    return {"success": True, "on": _mled_on}
-
-
-@app.post("/mled/blink")
-async def mled_blink(data: dict):
-    """Startet oder stoppt das Blinken des aktuellen Musters."""
-    global _mled_blink_task
-    if not drone_connection.connected:
-        return {"success": False, "error": "Nicht verbunden"}
-
-    enabled = bool(data.get("enabled", False))
-    freq = float(data.get("freq", 1.0))
-
-    await _stop_blink()
-
-    if enabled and _mled_on:
-        _mled_blink_task = asyncio.create_task(_blink_loop(freq))
-    elif _mled_on:
-        drone_connection.send_command(f"ext mled g {_current_mled_pattern}")
-
-    return {"success": True, "blinking": enabled and _mled_on}
-
-
-@app.post("/mled/scroll")
-async def mled_scroll(data: dict):
-    """Lässt Text als Laufschrift über die Matrix scrollen.
-
-    Tello SDK: ext mled <l|r|u|d> <r|b|p> <freq 0.1-2.5> <string max 70 Zeichen>
+    "leds" (oder "pattern"): Pixel als String aus '0' (aus), 'r', 'b', 'p'.
+    Ein voller 8x8-Frame hat 64 Zeichen; der String wird roh durchgereicht.
     """
     if not drone_connection.connected:
         return {"success": False, "error": "Nicht verbunden"}
-
-    text = str(data.get("text", "")).strip()[:70]
-    direction = str(data.get("direction", "l"))
-    color = str(data.get("color", "b"))
-    freq = max(0.1, min(2.5, float(data.get("freq", 1.5))))
-
-    if not text:
-        return {"success": False, "error": "Text darf nicht leer sein"}
-    if direction not in ("l", "r", "u", "d"):
-        return {"success": False, "error": "Richtung muss l/r/u/d sein"}
-    if color not in ("r", "b", "p"):
-        return {"success": False, "error": "Farbe muss r/b/p sein"}
-
-    await _stop_blink()
-    loop = asyncio.get_running_loop()
-    resp = await loop.run_in_executor(
-        None, drone_connection.send_command_with_response,
-        f"ext mled {direction} {color} {freq} {text}"
-    )
-    print(f"[MLED] Drohnen-Antwort (scroll): {resp!r}")
-    if resp not in ("ok", "OK"):
-        return {"success": False, "error": f"Drohne: {resp}"}
+    leds = str(data.get("leds", data.get("pattern", "")))
+    drone_connection.set_ledm(leds)
     return {"success": True}
 
 
@@ -1174,6 +1049,13 @@ async def rc_control(websocket: WebSocket):
                 _force_stop_all()
                 if control is not None:
                     control.emergency_stop()
+                continue
+
+            # Matrix-LED jederzeit erlaubt (nur ein LED-Befehl, auch im Auto-Flug).
+            # Akzeptiert {"command":"mled","leds":...} und {"Command":"MLED","LEDS":...}.
+            mled_cmd = msg.get("command") or msg.get("Command")
+            if mled_cmd and str(mled_cmd).lower() == "mled":
+                drone_connection.set_ledm(str(msg.get("leds", msg.get("LEDS", ""))))
                 continue
 
             if auto_flight_active or ring_mode_active:
