@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import threading
 import time
 from contextlib import contextmanager
@@ -20,8 +21,9 @@ os.environ.setdefault(
 )
 
 import cv2
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 try:
     import psycopg2
@@ -44,6 +46,7 @@ app = FastAPI(title="Drohnen-Backend")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -294,6 +297,37 @@ os.makedirs(RECORDINGS_DIR, exist_ok=True)
 is_recording = False
 video_writer: cv2.VideoWriter | None = None
 current_recording_filename: str | None = None
+
+
+def _transcode_to_h264(filename: str) -> bool:
+    """
+    OpenCVs gebündeltes FFmpeg kann nur MPEG-4 Part 2 ('mp4v') schreiben.
+    Dieser Codec wird von Browsern und Flutters video_player NICHT unterstützt.
+    Wir transkodieren die Datei daher mit dem System-ffmpeg nach H.264 (avc1),
+    das überall abspielbar ist. Die Datei wird in-place ersetzt.
+    """
+    src = os.path.join(RECORDINGS_DIR, filename)
+    if not os.path.exists(src):
+        return False
+    tmp = src + ".h264.mp4"
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-i", src,
+                "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+                tmp,
+            ],
+            check=True,
+        )
+        os.replace(tmp, src)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        print(f"[ERROR] H.264-Transkodierung fehlgeschlagen: {e}")
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -631,7 +665,7 @@ def get_drohnen():
         print(f"[ERROR] get_drohnen: {e}")
         return {"success": False, "error": "Datenbankfehler"}
 
-
+# d
 @app.post("/drohnen")
 def add_drohne(data: dict):
     if not DB_AVAILABLE:
@@ -656,7 +690,6 @@ def add_drohne(data: dict):
     except Exception as e:
         print(f"[ERROR] add_drohne: {e}")
         return {"success": False, "error": "Datenbankfehler"}
-
 
 @app.delete("/drohnen/{drohnen_id}")
 def delete_drohne(drohnen_id: int):
@@ -812,6 +845,12 @@ async def stop_recording():
     # Kurz warten, damit der Video-Loop den Writer sauber schließen kann
     await asyncio.sleep(0.5)
 
+    # mp4v → H.264 transkodieren, damit das Video abspielbar ist.
+    # Läuft im Thread-Pool, um den Event-Loop nicht zu blockieren.
+    if current_recording_filename:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _transcode_to_h264, current_recording_filename)
+
     if DB_AVAILABLE and current_recording_filename:
         try:
             with db_cursor() as cur:
@@ -824,6 +863,14 @@ async def stop_recording():
 
     current_recording_filename = None
     return {"success": True, "message": "Aufnahme gestoppt"}
+
+@app.get("/recordings/status")
+async def get_recording_status():
+    global is_recording
+    return {
+        "success": True, 
+        "isRecording": is_recording
+    }
 
 
 @app.get("/recordings")
@@ -842,6 +889,44 @@ async def get_recordings():
         return {"success": True, "data": data}
     except Exception as e:
         return {"success": False, "error": str(e)}
+    
+@app.post("/recordings/save")
+async def save_recording(data:dict):
+    filename = data.get("filename")
+    if not filename:
+        return {"success": False, "error": "Dateiname erforderlich"}
+    filepath = os.path.join(RECORDINGS_DIR, filename)
+    if not os.path.exists(filepath):
+        return {"success": False, "error": "Datei nicht gefunden"}
+    db_cursor().execute(
+        "INSERT INTO recordings (filename, created_at) VALUES (%s, %s)",
+        (filename, datetime.now())
+    )
+    return {"success": True, "message": "Aufnahme gespeichert"}
+    
+
+
+@app.get("/recordings/{rec_id}/video")
+async def serve_recording_video(rec_id: int):
+    # 1. Datenbank prüfen
+    if DB_AVAILABLE:
+        with db_cursor() as cur:
+            cur.execute("SELECT filename FROM recordings WHERE id = %s", (rec_id,))
+            row = cur.fetchone()
+
+            if row:
+                filename = row[0]
+                filepath = os.path.join(RECORDINGS_DIR, filename)
+                
+                if os.path.exists(filepath):
+                    return FileResponse(filepath, media_type="video/mp4")
+                else:
+                    raise HTTPException(status_code=404, detail="Datei existiert nicht auf Disk")
+            else:
+                raise HTTPException(status_code=404, detail="Aufnahme-ID nicht gefunden")
+    
+    # Wenn keine DB verfügbar ist oder Fehler auftritt
+    raise HTTPException(status_code=500, detail="Datenbank nicht erreichbar")
 
 
 @app.delete("/recordings/{rec_id}")
