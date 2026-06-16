@@ -13,7 +13,7 @@ print("Sende Konfigurationsbefehl an die Drohne...")
 
 # Hier werden die Zugangsdaten deines Handy-Hotspots eingetragen
 # Stelle sicher, dass "Kompatibilität maximieren" am iPhone an ist!
-r = drone.config_sta("Anes", "889anes23")
+r = drone.config_sta("King", "oscarluli187")
 
 print(f"Befehl wurde gesendet. Rückmeldung: {r}")
 
