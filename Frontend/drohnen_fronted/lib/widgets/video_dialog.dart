@@ -136,33 +136,50 @@ class _VideoDialogState extends State<VideoDialog> {
   }
 
   Future<void> _selectRecording(SavedRecording rec) async {
-    if (_selectedRecording?.id == rec.id) return;
+  if (_selectedRecording?.id == rec.id) return;
 
-    await _videoController?.dispose();
-    setState(() {
-      _selectedRecording = rec;
-      _videoController = null;
-      _videoInitializing = true;
-    });
+  // Cleanup vom alten Controller
+  await _videoController?.dispose();
+  
+  setState(() {
+    _selectedRecording = rec;
+    _videoController = null;
+    _videoInitializing = true;
+  });
 
-    final url =
-        'http://${widget.backendHost}/recordings/${rec.id}/video';
-    final controller = VideoPlayerController.networkUrl(Uri.parse(url));
-    try {
-      await controller.initialize();
-      if (mounted) {
-        setState(() {
-          _videoController = controller;
-          _videoInitializing = false;
-        });
-      } else {
-        controller.dispose();
-      }
-    } catch (_) {
-      if (mounted) setState(() => _videoInitializing = false);
+  final url = 'http://${widget.backendHost}/recordings/${rec.id}/video';
+  final controller = VideoPlayerController.networkUrl(Uri.parse(url));
+
+  try {
+    // Initialisierung mit Timeout-Schutz oder Fehler-Abfang
+    await controller.initialize();
+    
+    if (!mounted) {
       controller.dispose();
+      return;
     }
+
+    setState(() {
+      _videoController = controller;
+      _videoInitializing = false;
+    });
+  } catch (e) {
+    debugPrint("Fehler beim Laden des Videos: $e");
+    
+    if (mounted) {
+      setState(() {
+        _videoInitializing = false;
+        _videoController = null; // Auf null setzen, um UI-Fehler anzuzeigen
+      });
+      
+      // Optional: Ein Snack-Bar oder Dialog anzeigen
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Video konnte nicht geladen werden: $e")),
+      );
+    }
+    controller.dispose();
   }
+}
 
   @override
   void dispose() {

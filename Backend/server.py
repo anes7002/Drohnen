@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import os
+import subprocess
 import threading
 import time
 from contextlib import contextmanager
@@ -15,7 +16,7 @@ os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")  # OpenCV-Logger leiser stell
 os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "8")
 
 import cv2
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
@@ -185,6 +186,37 @@ os.makedirs(RECORDINGS_DIR, exist_ok=True)
 is_recording = False
 video_writer: cv2.VideoWriter | None = None
 current_recording_filename: str | None = None
+
+
+def _transcode_to_h264(filename: str) -> bool:
+    """
+    OpenCVs gebündeltes FFmpeg kann nur MPEG-4 Part 2 ('mp4v') schreiben.
+    Dieser Codec wird von Browsern und Flutters video_player NICHT unterstützt.
+    Wir transkodieren die Datei daher mit dem System-ffmpeg nach H.264 (avc1),
+    das überall abspielbar ist. Die Datei wird in-place ersetzt.
+    """
+    src = os.path.join(RECORDINGS_DIR, filename)
+    if not os.path.exists(src):
+        return False
+    tmp = src + ".h264.mp4"
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-i", src,
+                "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+                tmp,
+            ],
+            check=True,
+        )
+        os.replace(tmp, src)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        print(f"[ERROR] H.264-Transkodierung fehlgeschlagen: {e}")
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -770,6 +802,12 @@ async def stop_recording():
     # Kurz warten, damit der Video-Loop den Writer sauber schließen kann
     await asyncio.sleep(0.5)
 
+    # mp4v → H.264 transkodieren, damit das Video abspielbar ist.
+    # Läuft im Thread-Pool, um den Event-Loop nicht zu blockieren.
+    if current_recording_filename:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _transcode_to_h264, current_recording_filename)
+
     if DB_AVAILABLE and current_recording_filename:
         try:
             with db_cursor() as cur:
@@ -827,23 +865,25 @@ async def save_recording(data:dict):
 
 @app.get("/recordings/{rec_id}/video")
 async def serve_recording_video(rec_id: int):
+    # 1. Datenbank prüfen
     if DB_AVAILABLE:
-        try:
-            with db_cursor() as cur:
-                cur.execute("SELECT filename FROM recordings WHERE id = %s", (rec_id,))
-                row = cur.fetchone()
-                if row:
-                    filepath = os.path.join(RECORDINGS_DIR, row[0])
-                    if os.path.exists(filepath):
-                        return FileResponse(filepath, media_type="video/mp4")
-        except Exception:
-            pass
-    # Fallback: search by index in filesystem
-    files = sorted([f for f in os.listdir(RECORDINGS_DIR) if f.endswith(".mp4")])
-    if 0 <= rec_id < len(files):
-        filepath = os.path.join(RECORDINGS_DIR, files[rec_id])
-        return FileResponse(filepath, media_type="video/mp4")
-    return {"success": False, "error": "Nicht gefunden"}
+        with db_cursor() as cur:
+            cur.execute("SELECT filename FROM recordings WHERE id = %s", (rec_id,))
+            row = cur.fetchone()
+
+            if row:
+                filename = row[0]
+                filepath = os.path.join(RECORDINGS_DIR, filename)
+                
+                if os.path.exists(filepath):
+                    return FileResponse(filepath, media_type="video/mp4")
+                else:
+                    raise HTTPException(status_code=404, detail="Datei existiert nicht auf Disk")
+            else:
+                raise HTTPException(status_code=404, detail="Aufnahme-ID nicht gefunden")
+    
+    # Wenn keine DB verfügbar ist oder Fehler auftritt
+    raise HTTPException(status_code=500, detail="Datenbank nicht erreichbar")
 
 
 @app.delete("/recordings/{rec_id}")
