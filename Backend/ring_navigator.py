@@ -57,11 +57,15 @@ class RingNavigator:
     FORWARD_MIN: int = 20        # min forward speed when nearly at the ring
     SEARCH_YAW: int = 25         # yaw speed while searching
     PASS_SPEED: int = 40         # forward speed while passing through
-    PASS_DURATION: float = 2.0   # seconds to fly forward through the ring (kürzer = weniger Drift)
+    PASS_DURATION: float = 2.8   # seconds to fly forward through the ring — etwas länger = fliegt weiter durch (kürzer = weniger Drift)
     # Anti-Stehenbleiben: Ist der Ring nah (>= APPROACH_RADIUS), darf maximal so
     # lange nachzentriert werden — danach wird der Durchflug erzwungen. Sonst
     # hängt die Drohne bei leichtem Zittern ewig vor dem Ring.
     NEAR_COMMIT_TIMEOUT: float = 1.6
+    # Statt vor dem Ring komplett zu STOPPEN (→ Drohne bleibt mitten im Ring
+    # hängen), kriecht sie mit diesem Tempo langsam weiter hinein und zentriert
+    # dabei per Yaw. So fliegt sie ehrlich DURCH statt davor stehen zu bleiben.
+    NEAR_CREEP_SPEED: int = 16
     # Glättung der Ringposition: Einzelbild-Detektionen zittern (Rauschen,
     # H.264-Artefakte). Ein exponentieller Filter + Ausreißer-Verwurf macht
     # die Regelung ruhig und das Anvisieren der Ringmitte präzise.
@@ -355,7 +359,7 @@ class RingNavigator:
                 # oder Anti-Stall-Timeout), sonst exakt ausgerichtet durchfliegen.
                 commit = (
                     centered
-                    or radius >= self.APPROACH_RADIUS * 1.6
+                    or radius >= self.APPROACH_RADIUS * 1.4
                     or time.time() - self._near_since > self.NEAR_COMMIT_TIMEOUT
                 )
                 if commit:
@@ -363,10 +367,12 @@ class RingNavigator:
                     self._pass_start = time.time()
                     self._reset_tracking()
                     return (0, self.PASS_SPEED, 0, 0)
-                # Noch nicht frontal ausgerichtet → AUF DER STELLE drehen (KEIN
-                # Vorwärts!), damit keine Drift entsteht und sie nicht vorbeifliegt.
-                self._last_forward = 0
-                return (0, 0, c, d)
+                # Noch nicht ganz mittig: NICHT stehen bleiben (sonst bleibt die
+                # Drohne mitten im Ring hängen) — langsam weiter in den Ring
+                # kriechen und dabei per Yaw weiter zentrieren. Der Radius wächst
+                # dadurch von allein bis zum erzwungenen Durchflug.
+                self._last_forward = self.NEAR_CREEP_SPEED
+                return (0, self.NEAR_CREEP_SPEED, c, d)
             self._near_since = None
             self._prev_err_x = None
 
