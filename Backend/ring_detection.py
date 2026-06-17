@@ -28,10 +28,10 @@ _single_upper: np.ndarray | None = None
 _SCALE: float = 0.5        # Resize-Faktor: 0.5 = mehr Genauigkeit beim Zielpunkt, noch schnell
 _MIN_AREA: int = 500        # Min. Konturenfläche auf dem skalierten Frame
 _MIN_ASPECT: float = 0.35   # Min. Ellipsen-Aspektverhältnis — schräg angeflogene Ringe erlauben
-_MIN_HOLE_RATIO: float = 0.08  # Loch muss mind. 8 % der Gesamtfläche sein — schärfer gegen Fehl-Treffer (war 0.04)
+_MIN_HOLE_RATIO: float = 0.04  # Loch muss mind. 4 % der Gesamtfläche sein (Ring hat Loch)
 # Loch-Mitte darf höchstens so weit (× Außen-Durchmesser) von der Außenmitte
 # abweichen — sonst ist es kein sauberer Ring, sondern ein Fleck mit Kerbe.
-_MAX_CENTER_OFFSET: float = 0.22   # Loch muss konzentrischer sitzen — weniger Fehl-Treffer (war 0.30)
+_MAX_CENTER_OFFSET: float = 0.30
 
 
 # ─────────────────────────────────────────────────────────────────────────────
