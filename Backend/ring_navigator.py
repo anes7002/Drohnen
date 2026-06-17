@@ -58,11 +58,6 @@ class RingNavigator:
     SEARCH_YAW: int = 25         # yaw speed while searching
     PASS_SPEED: int = 40         # forward speed while passing through
     PASS_DURATION: float = 2.8   # seconds to fly forward through the ring — etwas länger = fliegt weiter durch (kürzer = weniger Drift)
-    # Wird der Durchflug aus der FERNE ausgelöst (kleiner Radius beim Commit, weil
-    # ein weit entfernter Ring kurz verloren ging), reicht PASS_DURATION nicht bis
-    # durch den Ring → die Drohne stoppt davor ("fliegt zu kurz"). Deshalb wird die
-    # Durchflugdauer an die Commit-Entfernung skaliert: weiter weg → länger geradeaus.
-    PASS_DISTANCE_FACTOR_MAX: float = 2.0   # max. Verlängerung des Durchflugs aus der Ferne
     # Anti-Stehenbleiben: Ist der Ring nah (>= APPROACH_RADIUS), darf maximal so
     # lange nachzentriert werden — danach wird der Durchflug erzwungen. Sonst
     # hängt die Drohne bei leichtem Zittern ewig vor dem Ring.
@@ -89,7 +84,6 @@ class RingNavigator:
         self._running = False
         self._thread: threading.Thread | None = None
         self._pass_start: float = 0.0
-        self._pass_duration_actual: float = self.PASS_DURATION  # an Commit-Entfernung angepasste Durchflugdauer
         self._detection_streak: int = 0  # Wie viele Frames der Ring schon stabil sichtbar ist
         self._lost_count: int = 0        # Wie viele Frames der Ring in Folge fehlt
         self._last_ring: tuple | None = None  # Letzte bekannte Ring-Position (zum Überbrücken)
@@ -231,24 +225,6 @@ class RingNavigator:
         self._near_since = None
         self._prev_err_x = None
 
-    def _begin_pass(self, radius_at_commit: float) -> tuple:
-        """
-        Wechselt in den Durchflug (PASSING).
-
-        Die Durchflugdauer wird an die Entfernung beim Commit angepasst: Wird der
-        Durchflug aus der Ferne ausgelöst (kleiner Radius — z. B. weil ein weit
-        entfernter Ring kurz verloren ging), fliegt die Drohne LÄNGER geradeaus,
-        damit sie wirklich DURCH den Ring kommt statt davor zu stoppen. Bei nahem
-        Commit (Radius >= APPROACH_RADIUS) bleibt es bei PASS_DURATION.
-        """
-        stretch = self.APPROACH_RADIUS / max(radius_at_commit, 1.0)
-        stretch = max(1.0, min(self.PASS_DISTANCE_FACTOR_MAX, stretch))
-        self._pass_duration_actual = self.PASS_DURATION * stretch
-        self.state = RingState.PASSING
-        self._pass_start = time.time()
-        self._reset_tracking()
-        return (0, self.PASS_SPEED, 0, 0)
-
     def _errors(self, ring: tuple) -> tuple[float, float]:
         """
         Pixel-Fehler zum ZIELPUNKT (nicht zur Bildmitte!).
@@ -292,7 +268,7 @@ class RingNavigator:
         # mitten im Durchflug, der Ring ist außerhalb des Sichtfelds). MUSS vor der
         # Ring-Verlust-Logik stehen, sonst bricht der Durchflug sofort ab.
         if self.state == RingState.PASSING:
-            if time.time() - self._pass_start >= self._pass_duration_actual:
+            if time.time() - self._pass_start >= self.PASS_DURATION:
                 self._reset_tracking()
                 self.state = RingState.SEARCHING  # Nächsten Ring suchen
                 return (0, 0, 0, 0)
@@ -340,7 +316,10 @@ class RingNavigator:
             # Ring beim Heranfliegen verloren, aber wir waren schon nah dran →
             # er füllt das Bild / ist aus dem Sichtfeld gerutscht → blind durchfliegen.
             if self._lost_count > 0 and radius >= self.APPROACH_RADIUS * self.COMMIT_FACTOR:
-                return self._begin_pass(radius)
+                self.state = RingState.PASSING
+                self._pass_start = time.time()
+                self._reset_tracking()
+                return (0, self.PASS_SPEED, 0, 0)
 
             err_x, err_y = self._errors(ring)
             centering_error = max(abs(err_x), abs(err_y))
@@ -384,7 +363,10 @@ class RingNavigator:
                     or time.time() - self._near_since > self.NEAR_COMMIT_TIMEOUT
                 )
                 if commit:
-                    return self._begin_pass(radius)
+                    self.state = RingState.PASSING
+                    self._pass_start = time.time()
+                    self._reset_tracking()
+                    return (0, self.PASS_SPEED, 0, 0)
                 # Noch nicht ganz mittig: NICHT stehen bleiben (sonst bleibt die
                 # Drohne mitten im Ring hängen) — langsam weiter in den Ring
                 # kriechen und dabei per Yaw weiter zentrieren. Der Radius wächst

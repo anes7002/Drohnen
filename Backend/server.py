@@ -977,10 +977,7 @@ async def video_stream(websocket: WebSocket):
     loop = asyncio.get_running_loop()
     last_seq = -1
 
-    # Sendegröße = native Tello-Breite (960) → kein Verkleinern, schärferes Bild.
-    # Bei Lag auf dem Handy (WLAN-Bandbreite) ruhig auf 720 senken.
-    STREAM_WIDTH = 960
-    JPEG_QUALITY = 80   # 65 → 80: deutlich weniger JPEG-Artefakte (kostet etwas Bandbreite)
+    STREAM_WIDTH = 640  # Sendegröße: kleiner = schnelleres Encoding + weniger Bandbreite
 
     def _encode(f) -> bytes:
         h, w = f.shape[:2]
@@ -989,7 +986,7 @@ async def video_stream(websocket: WebSocket):
                 f, (STREAM_WIDTH, int(h * STREAM_WIDTH / w)),
                 interpolation=cv2.INTER_AREA,
             )
-        ok, buf = cv2.imencode(".jpg", f, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+        ok, buf = cv2.imencode(".jpg", f, [cv2.IMWRITE_JPEG_QUALITY, 65])
         return buf.tobytes() if ok else b""
 
     try:
