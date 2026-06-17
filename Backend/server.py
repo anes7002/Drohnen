@@ -492,6 +492,27 @@ async def set_mled(data: dict):
     return {"success": True}
 
 
+@app.post("/mled/text")
+async def set_mled_text(data: dict):
+    """Zeigt scrollenden Text auf der 8x8-LED-Matrix (Tello Talent).
+
+    "text": anzuzeigender Text. Optional: "color" (r/b/p), "direction" (l/r/u/d),
+    "freq" (0.1–2.5). Die Drohne scrollt den Text über die Matrix.
+    """
+    if not drone_connection.connected:
+        return {"success": False, "error": "Nicht verbunden"}
+    text = str(data.get("text", "")).strip()
+    if not text:
+        return {"success": False, "error": "Kein Text"}
+    drone_connection.set_ledm_text(
+        text,
+        color=str(data.get("color", "r")),
+        direction=str(data.get("direction", "l")),
+        freq=float(data.get("freq", 2.5)),
+    )
+    return {"success": True}
+
+
 # ---------------------------------------------------------------------------
 # Erkennung-Endpoints
 # ---------------------------------------------------------------------------

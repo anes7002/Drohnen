@@ -116,6 +116,23 @@ class DroneConnection:
             self.socket.sendto(message.encode("utf-8"), (self.ip_address, self.DRONE_PORT))
             print(f"[MLED] {message}")
 
+    def set_ledm_text(self, text: str, color: str = "r", direction: str = "l", freq: float = 2.5):
+        """Zeigt scrollenden Text auf der 8x8-LED-Matrix (Tello Talent).
+
+        Befehl: EXT mled <move> <color> <freq> <string>
+          move  = l/r/u/d (Laufrichtung), color = r/b/p, freq = 0.1–2.5.
+        Auch hier MUSS 'EXT' groß sein, sonst ignoriert die Firmware den Befehl.
+        Die Firmware kann nur Großbuchstaben/Ziffern → Text wird hochgestellt.
+        """
+        if self.connected and self.socket:
+            color = color if color in ("r", "b", "p") else "r"
+            direction = direction if direction in ("l", "r", "u", "d") else "l"
+            freq = max(0.1, min(2.5, freq))
+            text = text.upper()
+            message = f"EXT mled {direction} {color} {freq} {text}"
+            self.socket.sendto(message.encode("utf-8"), (self.ip_address, self.DRONE_PORT))
+            print(f"[MLED-TEXT] {message}")
+
     def send_command_with_response(self, command: str, timeout=None) -> str:
         """
         Sendet einen Befehl und wartet auf die Antwort der Drohne ("ok" / "error").

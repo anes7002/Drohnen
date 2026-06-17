@@ -19,6 +19,7 @@ class _LedMatrixGridState extends State<LedMatrixGrid> {
   final List<String> _cells = List.filled(64, '0');
   String _paint = 'r'; // aktuell gewählte "Pinsel"-Farbe
   bool _busy = false;
+  final TextEditingController _textCtrl = TextEditingController(); // Lauftext
 
   static const Map<String, Color> _palette = {
     '0': Color(0xFF2A2A2A), // aus
@@ -68,6 +69,39 @@ class _LedMatrixGridState extends State<LedMatrixGrid> {
       }
     });
     _send();
+  }
+
+  /// Schickt einen Lauftext an die Matrix (Tello scrollt ihn über das 8x8-Raster).
+  Future<void> _sendText() async {
+    final text = _textCtrl.text.trim();
+    if (text.isEmpty) return;
+    // Textfarbe = aktuelle Pinselfarbe ('Aus' → Rot, da Text eine Farbe braucht).
+    final color = _paint == '0' ? 'r' : _paint;
+    setState(() => _busy = true);
+    try {
+      await http.post(
+        Uri.parse('http://${widget.backendHost}/mled/text'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'text': text, 'color': color}),
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Verbindungsfehler: $e'),
+            backgroundColor: Colors.red[700],
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    _textCtrl.dispose();
+    super.dispose();
   }
 
   @override
@@ -214,6 +248,51 @@ class _LedMatrixGridState extends State<LedMatrixGrid> {
                   tooltip: 'Alles aus',
                   color: Colors.white,
                   style: IconButton.styleFrom(backgroundColor: Colors.grey[800]),
+                ),
+              ],
+            ),
+
+            const Divider(color: Colors.white24, height: 28),
+
+            const Text('Text auf Matrix (scrollt in Pinsel-Farbe)',
+                style: TextStyle(color: Colors.white54, fontSize: 12)),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _textCtrl,
+                    style: const TextStyle(color: Colors.white),
+                    textCapitalization: TextCapitalization.characters,
+                    onSubmitted: (_) => _sendText(),
+                    decoration: InputDecoration(
+                      hintText: 'z. B. HALLO',
+                      hintStyle: const TextStyle(color: Colors.white30),
+                      filled: true,
+                      fillColor: Colors.black26,
+                      contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 10),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8),
+                        borderSide: const BorderSide(color: Colors.white12),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8),
+                        borderSide: const BorderSide(color: Colors.blueGrey),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                ElevatedButton.icon(
+                  onPressed: _busy ? null : _sendText,
+                  icon: const Icon(Icons.title),
+                  label: const Text('Anzeigen'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.blueGrey[700],
+                    padding:
+                        const EdgeInsets.symmetric(vertical: 14, horizontal: 12),
+                  ),
                 ),
               ],
             ),
