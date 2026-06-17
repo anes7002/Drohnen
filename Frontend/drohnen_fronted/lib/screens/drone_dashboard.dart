@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 import 'package:drohnen_fronted/widgets/video_dialog.dart';
-import 'package:flutter/foundation.dart' show defaultTargetPlatform, TargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
@@ -693,50 +692,13 @@ class _DroneDashboardState extends State<DroneDashboard> {
 
   @override
   Widget build(BuildContext context) {
-    final bool isMobile = defaultTargetPlatform == TargetPlatform.android ||
-        defaultTargetPlatform == TargetPlatform.iOS;
     return Focus(
       focusNode: _focusNode,
       autofocus: true,
       onKeyEvent: _handleKeyEvent,
       child: Scaffold(
-        // Tastatur (IP-Feld) soll das skalierte Layout nicht umspringen lassen.
-        resizeToAvoidBottomInset: false,
-        // Am Handy: das komplette, für den PC gebaute Layout proportional auf
-        // die Bildschirmgröße herunterskalieren → gleiches Aussehen wie am PC,
-        // nur passend verkleinert. Am PC/Desktop bleibt alles unverändert.
-        body: isMobile ? _buildResponsiveBody() : _buildBody(),
-      ),
-    ); // Focus
-  }
-
-  /// Skaliert das in [_buildBody] aufgebaute Layout (für ~720 px Höhe wie am PC
-  /// entworfen) bildschirmfüllend und unverzerrt auf die Handy-Größe.
-  /// Die Design-Breite folgt dem Seitenverhältnis des Geräts, damit nichts
-  /// gestaucht wird und keine schwarzen Balken entstehen.
-  Widget _buildResponsiveBody() {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        const double designHeight = 720.0; // kleiner = alles wirkt größer
-        final double aspect = constraints.maxHeight > 0
-            ? constraints.maxWidth / constraints.maxHeight
-            : 16 / 9;
-        final double designWidth = designHeight * aspect;
-        return FittedBox(
-          fit: BoxFit.contain,
-          child: SizedBox(
-            width: designWidth,
-            height: designHeight,
-            child: _buildBody(),
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _buildBody() {
-    return Stack(
-      children: [
+        body: Stack(
+          children: [
             isConnected
                 ? VideoStreamView(backendUrl: 'ws://$backendHost/video')
                 : Container(
@@ -771,7 +733,9 @@ class _DroneDashboardState extends State<DroneDashboard> {
               ),
             ),
           ],
-        );
+        ),
+      ),
+    ); // Focus
   }
 
   Widget _buildTopHUD() {

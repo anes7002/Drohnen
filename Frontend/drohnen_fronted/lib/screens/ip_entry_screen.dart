@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'package:flutter/foundation.dart' show defaultTargetPlatform, TargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
@@ -150,8 +149,6 @@ class _IpEntryScreenState extends State<IpEntryScreen> {
  
   @override
   Widget build(BuildContext context) {
-    final bool isMobile = defaultTargetPlatform == TargetPlatform.android ||
-        defaultTargetPlatform == TargetPlatform.iOS;
     return Scaffold(
       body: Container(
         decoration: BoxDecoration(
@@ -162,20 +159,10 @@ class _IpEntryScreenState extends State<IpEntryScreen> {
           ),
         ),
         child: Center(
-          // Am Handy die ganze Karte proportional einpassen (wie ein
-          // verkleinertes PC-Fenster); am PC bleibt sie scrollbar wie bisher.
-          child: isMobile
-              ? FittedBox(fit: BoxFit.contain, child: _buildCard())
-              : SingleChildScrollView(child: _buildCard()),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildCard() {
-    return GlassContainer(
-      width: 750,
-      child: Padding(
+          child: SingleChildScrollView(
+            child: GlassContainer(
+              width: 750,
+              child: Padding(
                 padding: const EdgeInsets.all(24.0),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
@@ -316,6 +303,10 @@ class _IpEntryScreenState extends State<IpEntryScreen> {
                   ],
                 ),
               ),
-            );
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
