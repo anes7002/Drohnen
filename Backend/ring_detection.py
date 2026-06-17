@@ -121,7 +121,6 @@ def detect(frame) -> tuple | None:
     best_score: float = 0.0
 
     for i, cnt in enumerate(contours):
-        # Nur Außenkonturen (kein Elternteil) betrachten
         if hierarchy[i][3] != -1:
             continue
 
