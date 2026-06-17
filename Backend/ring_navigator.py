@@ -58,11 +58,6 @@ class RingNavigator:
     SEARCH_YAW: int = 25         # yaw speed while searching
     PASS_SPEED: int = 40         # forward speed while passing through
     PASS_DURATION: float = 2.8   # seconds to fly forward through the ring — etwas länger = fliegt weiter durch (kürzer = weniger Drift)
-    # Wird der Durchflug aus der FERNE ausgelöst (kleiner Radius beim Commit, weil
-    # ein weit entfernter Ring kurz verloren ging), reicht PASS_DURATION nicht bis
-    # durch den Ring → die Drohne stoppt davor ("fliegt zu kurz"). Deshalb wird die
-    # Durchflugdauer an die Commit-Entfernung skaliert: weiter weg → länger geradeaus.
-    PASS_DISTANCE_FACTOR_MAX: float = 2.0   # max. Verlängerung des Durchflugs aus der Ferne
     # Anti-Stehenbleiben: Ist der Ring nah (>= APPROACH_RADIUS), darf maximal so
     # lange nachzentriert werden — danach wird der Durchflug erzwungen. Sonst
     # hängt die Drohne bei leichtem Zittern ewig vor dem Ring.
@@ -89,7 +84,6 @@ class RingNavigator:
         self._running = False
         self._thread: threading.Thread | None = None
         self._pass_start: float = 0.0
-        self._pass_duration_actual: float = self.PASS_DURATION  # an Commit-Entfernung angepasste Durchflugdauer
         self._detection_streak: int = 0  # Wie viele Frames der Ring schon stabil sichtbar ist
         self._lost_count: int = 0        # Wie viele Frames der Ring in Folge fehlt
         self._last_ring: tuple | None = None  # Letzte bekannte Ring-Position (zum Überbrücken)
@@ -231,68 +225,40 @@ class RingNavigator:
         self._near_since = None
         self._prev_err_x = None
 
-    def _begin_pass(self, radius_at_commit: float) -> tuple:
-        """
-        Wechselt in den Durchflug (PASSING).
-
-        Die Durchflugdauer wird an die Entfernung beim Commit angepasst: Wird der
-        Durchflug aus der Ferne ausgelöst (kleiner Radius — z. B. weil ein weit
-        entfernter Ring kurz verloren ging), fliegt die Drohne LÄNGER geradeaus,
-        damit sie wirklich DURCH den Ring kommt statt davor zu stoppen. Bei nahem
-        Commit (Radius >= APPROACH_RADIUS) bleibt es bei PASS_DURATION.
-        """
-        stretch = self.APPROACH_RADIUS / max(radius_at_commit, 1.0)
-        stretch = max(1.0, min(self.PASS_DISTANCE_FACTOR_MAX, stretch))
-        self._pass_duration_actual = self.PASS_DURATION * stretch
-        self.state = RingState.PASSING
-        self._pass_start = time.time()
-        self._reset_tracking()
-        return (0, self.PASS_SPEED, 0, 0)
-
-    def _errors(self, ring: tuple) -> tuple[float, float]:
-        """
-        Pixel-Fehler zum ZIELPUNKT (nicht zur Bildmitte!).
-
-        Vertikal liegt der Zielpunkt TARGET_OFFSET_Y über der Bildmitte
-        (Kamera-Neigung) plus Nick-Ausgleich beim Vorwärtsflug. Nur so endet
-        die Drohne auf Ring-Höhe statt darüber.
-        """
+    def _errors(self, ring: tuple) -> tuple[float, float]: 
         cx, cy, _ = ring
         target_y = (
             self.fh // 2
             - self.TARGET_OFFSET_Y
             - self.PITCH_COMP * self._last_forward
         )
-        err_x = cx - self.fw // 2   # positiv = Ring rechts vom Ziel
-        err_y = cy - target_y       # positiv = Ring unter dem Ziel → sinken
+        err_x = cx - self.fw // 2   
+        err_y = cy - target_y       
         return err_x, err_y
 
     def _step(self, ring: tuple | None) -> tuple:
-        # ── SEARCHING ────────────────────────────────────────────────────────
         if self.state == RingState.SEARCHING:
             self._last_forward = 0
             if ring is None:
-                # Einzelner Aussetzer während der Bestätigung verwirft den
-                # Fortschritt nicht komplett — erst bei streak 0 weiterdrehen.
-                self._detection_streak = max(0, self._detection_streak - 1)
+                #
+                self._detection_streak = max(0, self._detection_stDreak - 1)
                 if self._detection_streak > 0:
-                    return (0, 0, 0, 0)  # kurz warten, Ring war gerade noch da
-                return (0, 0, 0, self.SEARCH_YAW)  # Drehen bis Ring gefunden
-            # Ring gesehen — erst nach 6 stabilen Ticks (≈ 0.3 s bei 20 Hz) wechseln
+                    return (0, 0, 0, 0)  
+                return (0, 0, 0, self.SEARCH_YAW)  
             self._detection_streak += 1
             if self._detection_streak >= 6:
                 self._detection_streak = 0
                 self._lost_count = 0
                 self._last_ring = ring
                 self.state = RingState.ALIGNING
-            return (0, 0, 0, 0)  # Stopp während der Bestätigung
+            return (0, 0, 0, 0)  
 
         # ── PASSING ───────────────────────────────────────────────────────────
         # Rein zeitbasiert — ignoriert die Ring-Erkennung komplett (die Drohne ist
         # mitten im Durchflug, der Ring ist außerhalb des Sichtfelds). MUSS vor der
         # Ring-Verlust-Logik stehen, sonst bricht der Durchflug sofort ab.
         if self.state == RingState.PASSING:
-            if time.time() - self._pass_start >= self._pass_duration_actual:
+            if time.time() - self._pass_start >= self.PASS_DURATION:
                 self._reset_tracking()
                 self.state = RingState.SEARCHING  # Nächsten Ring suchen
                 return (0, 0, 0, 0)
@@ -316,18 +282,13 @@ class RingNavigator:
             self._lost_count = 0
             self._last_ring = ring
 
-        # ── ALIGNING ─────────────────────────────────────────────────────────
         if self.state == RingState.ALIGNING:
             self._last_forward = 0
-            err_x, err_y = self._errors(ring)
+            err_x, err_y = self._errors(ring) 
 
-            # Ausrichtung per DREHUNG (Yaw) statt seitlichem Schieben — so baut die
-            # Drohne keine Quer-Geschwindigkeit auf, die sie später am Ring vorbeiträgt.
-            # Höhe wird weiter per Hoch/Runter korrigiert (geht nicht per Yaw).
             d = self._clamp(err_x * self.KP_YAW, -self.YAW_MAX, self.YAW_MAX)
-            c = self._clamp(-err_y * self.KP_VERTICAL, -40, 40)  # invert: ring below → fly down
+            c = self._clamp(-err_y * self.KP_VERTICAL, -40, 40)  
 
-            # Erst wenn die Drohne den Ring frontal anschaut (kleiner Seitenfehler), anfliegen.
             if abs(err_x) < self.ALIGN_THRESH_X and abs(err_y) < self.ALIGN_THRESH:
                 self.state = RingState.APPROACHING
 
@@ -336,36 +297,27 @@ class RingNavigator:
         # ── APPROACHING ───────────────────────────────────────────────────────
         if self.state == RingState.APPROACHING:
             radius = ring[2]
-
-            # Ring beim Heranfliegen verloren, aber wir waren schon nah dran →
-            # er füllt das Bild / ist aus dem Sichtfeld gerutscht → blind durchfliegen.
             if self._lost_count > 0 and radius >= self.APPROACH_RADIUS * self.COMMIT_FACTOR:
-                return self._begin_pass(radius)
+                self.state = RingState.PASSING
+                self._pass_start = time.time()
+                self._reset_tracking()
+                return (0, self.PASS_SPEED, 0, 0)
 
             err_x, err_y = self._errors(ring)
             centering_error = max(abs(err_x), abs(err_y))
 
-            # Seitlich/vertikal zu weit daneben → zurück zum reinen Ausrichten (Drehen).
             if abs(err_x) > self.ALIGN_THRESH_X * 3 or abs(err_y) > self.ALIGN_THRESH * 1.5:
                 self._last_forward = 0
                 self._near_since = None
                 self._prev_err_x = None
                 self.state = RingState.ALIGNING
                 return (0, 0, 0, 0)
-
-            # Ring groß genug → Durchflug, sobald die Mitte sauber anvisiert ist.
-            # Anti-Stall: Hängt die Drohne länger als NEAR_COMMIT_TIMEOUT vor dem
-            # Ring (oder rutscht er gleich aus dem Bild), wird der Durchflug
-            # erzwungen — lieber leicht außermittig durch als stehen bleiben.
             if radius >= self.APPROACH_RADIUS:
                 if self._near_since is None:
                     self._near_since = time.time()
                 d = self._clamp(err_x * self.KP_YAW, -self.YAW_MAX, self.YAW_MAX)
                 c = self._clamp(-err_y * self.KP_VERTICAL, -35, 35)
 
-                # "Ausgeschwungen": Seitenfehler klein UND ändert sich kaum (keine
-                # Restdrehung mehr). Nur dann geht der Blindflug gerade durch die
-                # Mitte statt schräg vorbei.
                 settled_x = (
                     self._prev_err_x is not None
                     and abs(err_x - self._prev_err_x) <= self.SETTLE_DELTA
@@ -376,35 +328,27 @@ class RingNavigator:
                     and abs(err_y) <= self.ALIGN_THRESH
                     and settled_x
                 )
-                # Erzwungener Durchflug nur als Sicherung (Ring rutscht aus dem Bild
-                # oder Anti-Stall-Timeout), sonst exakt ausgerichtet durchfliegen.
                 commit = (
                     centered
                     or radius >= self.APPROACH_RADIUS * 1.4
                     or time.time() - self._near_since > self.NEAR_COMMIT_TIMEOUT
                 )
                 if commit:
-                    return self._begin_pass(radius)
-                # Noch nicht ganz mittig: NICHT stehen bleiben (sonst bleibt die
-                # Drohne mitten im Ring hängen) — langsam weiter in den Ring
-                # kriechen und dabei per Yaw weiter zentrieren. Der Radius wächst
-                # dadurch von allein bis zum erzwungenen Durchflug.
+                    self.state = RingState.PASSING
+                    self._pass_start = time.time()
+                    self._reset_tracking()
+                    return (0, self.PASS_SPEED, 0, 0)
                 self._last_forward = self.NEAR_CREEP_SPEED
                 return (0, self.NEAR_CREEP_SPEED, c, d)
             self._near_since = None
             self._prev_err_x = None
 
-            # Ausrichten per DREHUNG mit voller Verstärkung — das Loch anvisieren.
             d = self._clamp(err_x * self.KP_YAW, -self.YAW_MAX, self.YAW_MAX)
             c = self._clamp(-err_y * self.KP_VERTICAL, -35, 35)
-
-            # Vorwärts mit Mindesttempo: je weiter von der Mitte weg, desto
-            # langsamer — aber nie ganz stehen bleiben, solange der Fehler nicht
-            # massiv ist. Korrigiert (gedreht) wird WÄHREND des Fliegens.
             if centering_error > self.ALIGN_THRESH * 2:
-                forward = 0  # sehr weit daneben → erst grob ausrichten
+                forward = 0  
             else:
-                progress = min(1.0, radius / self.APPROACH_RADIUS)  # 0 fern → 1 nah
+                progress = min(1.0, radius / self.APPROACH_RADIUS)  
                 base = self.FORWARD_MAX - progress * (self.FORWARD_MAX - self.FORWARD_MIN)
                 scale = max(0.35, 1.0 - centering_error / (self.ALIGN_THRESH * 2.0))
                 forward = max(int(base * scale), 8)
