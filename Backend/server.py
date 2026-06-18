@@ -863,11 +863,8 @@ async def stop_recording():
     global is_recording, video_writer, current_recording_filename
     is_recording = False
 
-    # Kurz warten, damit der Video-Loop den Writer sauber schließen kann
     await asyncio.sleep(0.5)
 
-    # mp4v → H.264 transkodieren, damit das Video abspielbar ist.
-    # Läuft im Thread-Pool, um den Event-Loop nicht zu blockieren.
     if current_recording_filename:
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, _transcode_to_h264, current_recording_filename)
@@ -929,7 +926,6 @@ async def save_recording(data:dict):
 
 @app.get("/recordings/{rec_id}/video")
 async def serve_recording_video(rec_id: int):
-    # 1. Datenbank prüfen
     if DB_AVAILABLE:
         with db_cursor() as cur:
             cur.execute("SELECT filename FROM recordings WHERE id = %s", (rec_id,))
@@ -946,7 +942,6 @@ async def serve_recording_video(rec_id: int):
             else:
                 raise HTTPException(status_code=404, detail="Aufnahme-ID nicht gefunden")
     
-    # Wenn keine DB verfügbar ist oder Fehler auftritt
     raise HTTPException(status_code=500, detail="Datenbank nicht erreichbar")
 
 
