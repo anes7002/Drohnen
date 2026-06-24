@@ -52,7 +52,7 @@ Steuerung der LED-Matrix, Videoaufnahmen sowie das Aufzeichnen und Abspielen von
 
 ## Voraussetzungen
 
-- **Python** 3.8 oder höher
+- **Python** 3.8 (Robomaster unterstützt keine höhere Versionen)
 - **Flutter SDK** 3.11 oder höher (Dart SDK ^3.11.0)
 - **Docker** & Docker Compose (für die PostgreSQL-Datenbank)
 - **Git**
