@@ -5,6 +5,8 @@ einem Python-Backend (FastAPI) und einem Flutter-Frontend. Das System erlaubt Li
 per Joystick, Live-Videostream, KI-gestützte Objekterkennung, autonomen Ring-Flug,
 Steuerung der LED-Matrix, Videoaufnahmen sowie das Aufzeichnen und Abspielen von Flugkursen.
 
+<img src="readme/img/drone.png" width="400">
+
 ## Inhaltsverzeichnis
 
 - [Architektur](#architektur)
